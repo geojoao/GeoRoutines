@@ -1,0 +1,7 @@
+# file: config.yaml
+name: "modis-evi-hexagono"
+command:
+  - "python"
+  - "evi_by_flower.py"
+code: files
+image: "bbmprd.azurecr.io/bocombbm/planetarycomputer/bbmpcpy:20251029.4"
