@@ -11,32 +11,34 @@ Para cada `(hexágono, ano, classe)` o resultado traz a série temporal de
 
 ## O que o pipeline faz
 
-A chave da performance é um **lattice global** (bordas de pixel em múltiplos de
-`TARGET_RES_DEG`) e **caches por tile VIIRS**, de modo que a reprojeção/
-reamostragem cara aconteça **uma vez por tile** e seja reaproveitada por todos
-os ~milhares de hexágonos que caem nele (`fenologia/tiles.py`).
+**Não há cache em disco.** Os hexágonos H3 são agrupados em "baldes" pelo
+conjunto de tiles VIIRS senoidais que cada um toca
+(`tiles.tiles_for_geometry`, `fenologia/tiles.py`) — normalmente um balde =
+um tile, cobrindo ~milhares de hexágonos vizinhos. Para cada balde e cada ano
+(`fenologia.pipeline.process_tile_bucket`):
 
-**Etapa `prepare` (pesada, uma vez por tile — é onde acontece TODA a rede):**
-- **VIIRS** (`fenologia/viirs.py`): por `(tile, ano)`, busca no CMR + baixa os
-  `.h5` (com **retry** em erros transitórios do servidor) e reprojeta da grade
-  senoidal → EPSG:4326, salvando um COG por `(tile, data)`. Um marcador
-  `.prepared_{ano}` evita refazer busca/download.
-- **MapBiomas** (`fenologia/mapbiomas.py`): cada raster anual é **reamostrado por
-  maioria** (`Resampling.mode`, via `WarpedVRT` em streaming) ao grid do tile e
-  salvo como GeoTIFF por `(tile, ano, tipo)`.
+- **VIIRS** (`fenologia/viirs.py`, `build_tile_cube`): busca no CMR os
+  granules `(tile, data)` do ano (com **retry** em erros transitórios), abre
+  cada um via `earthaccess.open` — **S3 direto** quando o ambiente está
+  in-region na AWS region da LP DAAC, HTTPS caso contrário — copia para um
+  `.h5` **temporário**, lê o EVI (h5py) e reprojeta da grade senoidal →
+  EPSG:4326 **direto para o grid do balde, em memória**. O `.h5` temporário é
+  apagado imediatamente após a leitura. Cada granule aberto gera um log
+  `acesso via S3 (...)` ou `acesso via HTTPS (...)` — confira esses logs para
+  validar que o tráfego está saindo pelo S3.
+- **MapBiomas** (`fenologia/mapbiomas.py`, `read_mapbiomas_on_grid`): lê o
+  GeoTIFF anual (COG com overviews) direto via `WarpedVRT`
+  (`Resampling.mode`, maioria) para o grid do balde — sem nenhum arquivo
+  intermediário; o GDAL só busca os blocos necessários.
 
-Ambos rodam com progress bar antes do loop (controlável com `--no-prepare`).
-
-**Etapa por hexágono (barata, local, sem rede):** apenas **leituras por janela**
-dos COGs cacheados — para cada data: recorta os tiles que tocam o hexágono, faz
-o **mosaico** e alinha ao grid (sem reprojeção senoidal). Depois, para cada
-classe de agricultura, mascara o cubo de EVI e agrega **no espaço** → média /
-mínimo / p25 / p75 por data (`fenologia/extract.py`).
+O cubo VIIRS e os rasters MapBiomas do balde/ano ficam **em memória** só
+durante o processamento desse balde/ano: para cada hexágono do balde, recorta
+(`clip_box`/`clip`, barato) à sua janela, mascara o cubo de EVI por classe de
+agricultura e agrega **no espaço** → média / mínimo / p25 / p75 por data
+(`fenologia/extract.py`). Ao fim do ano, tudo é descartado antes do próximo
+balde/ano.
 
 Saída: um **parquet por hexágono** no formato *wide* (uma linha por data).
-
-> Caches em `data/viirs_cache` (.h5 brutos), `data/tile_cache/viirs` (EVI por
-> tile/data) e `data/tile_cache/mapbiomas` (MapBiomas por tile/ano/tipo).
 
 ### As duas fontes do MapBiomas por ano
 
@@ -100,30 +102,24 @@ machine urs.earthdata.nasa.gov login seu_usuario password sua_senha
 ## Acesso ao VIIRS: HTTPS x S3 direto
 
 Os granules VIIRS podem ser obtidos por **HTTPS** (padrão fora da AWS) ou
-**direto do S3 da LP DAAC** (`us-west-2`). Rodando a rotina **dentro de
-`us-west-2`** (ex.: um notebook/instância nessa região), o acesso S3 é
-*in-region*: baixa latência e sem custo de egress. Controle pela variável
-`VIIRS_ACCESS_MODE`:
+**direto do S3 da LP DAAC** (`us-west-2`). O `earthaccess.open()`
+(`fenologia/viirs.py`, `open_granule`) escolhe automaticamente: S3 direto
+quando o ambiente está *in-region* em `us-west-2` (baixa latência, sem custo
+de egress), HTTPS caso contrário — não há nenhuma variável de ambiente para
+configurar.
 
-| valor | comportamento |
-|---|---|
-| `auto` (padrão) | usa S3 quando detecta execução in-region (`AWS_REGION`/`AWS_DEFAULT_REGION` == `us-west-2`, ou a detecção do earthaccess); caso contrário, HTTPS |
-| `s3` | força o acesso direto ao S3 (use ao rodar em us-west-2) |
-| `download` | força o download via HTTPS para o cache local (`.h5`) |
+Para cada granule baixado, `build_tile_cube` loga o tipo de acesso usado
+(`_access_kind`, que inspeciona a classe real por trás do `EarthAccessFile`):
 
-```bash
-# Rodando num notebook/instância em us-west-2:
-export VIIRS_ACCESS_MODE=s3
-uv run python run.py --boundary data/brazil.geojson
+```
+[h12v10 2024-01-01] VNP13A1.A2024001.h12v10.002.xxxx: acesso via S3 (s3fs.core.S3File)
 ```
 
-No modo S3 o granule é **copiado do S3 para o cache local** (`data/viirs_cache`)
-e lido com h5py — mesmo footprint de disco do modo HTTPS, só trocando o
-transporte. Para ler direto do objeto S3 sem cópia local, use `VIIRS_S3_STREAM=1`
-(pode ser mais lento por causa das leituras HDF5 sobre fsspec). A autenticação
-Earthdata é a mesma; as credenciais temporárias do S3 são obtidas pelo
-earthaccess a partir do seu login. **Todo o resto (MapBiomas, cache por tile,
-parquets) continua em disco local, sem mudanças.**
+ou `acesso via HTTPS (...)` fora de `us-west-2`. Confira essas linhas para
+validar que o tráfego está saindo pelo S3. O granule é copiado para um `.h5`
+**temporário**, lido com h5py e apagado imediatamente — a autenticação
+Earthdata é a mesma em ambos os casos (as credenciais temporárias do S3 são
+obtidas pelo earthaccess a partir do seu login).
 
 ## Uso
 
@@ -141,8 +137,13 @@ uv run python run.py --boundary data/brazil.geojson
 Como biblioteca:
 
 ```python
-from fenologia.pipeline import process_hexagon
-df = process_hexagon("858b8633fffffff", years=[2024])
+from fenologia.grid import cell_to_polygon
+from fenologia.pipeline import process_tile_bucket
+from fenologia.tiles import tiles_for_geometry
+
+hex_id = "858b8633fffffff"
+tiles_hv = tuple(sorted(tiles_for_geometry(cell_to_polygon(hex_id))))
+df = process_tile_bucket([hex_id], tiles_hv, years=[2024])[hex_id]
 ```
 
 Os parquets são salvos em `data/output/evi_{hexagono}.parquet`. O modo `resume`
@@ -183,34 +184,34 @@ uv run python tests/test_offline.py
 
 ```
 fenologia/
-  config.py       # constantes (anos, classes, produto VIIRS, caminhos, caches)
+  config.py       # constantes (anos, classes, produto VIIRS, caminhos)
   grid.py         # grid H3 res. 5 (h3 v4)
-  tiles.py        # matemática dos tiles senoidais + grid alvo por tile (lattice global)
+  tiles.py        # matemática dos tiles senoidais + grid do balde (lattice global)
   rasterutils.py  # template do grid alvo (snap ao lattice global)
-  viirs.py        # busca/download/leitura HDF5 + cache COG por (tile,data) + cubo
-  mapbiomas.py    # reamostragem (maioria) por (tile,ano,tipo) via WarpedVRT + cache
+  viirs.py        # busca/download (S3 ou HTTPS) + leitura HDF5 + cubo em memória
+  mapbiomas.py    # reamostragem (maioria) via WarpedVRT, direto p/ grid do balde
   extract.py      # estatísticas de EVI por classe + pivot p/ formato wide
-  pipeline.py     # orquestração (prepare / process_hexagon / run) + progress bar
+  pipeline.py     # orquestração (process_tile_bucket / run) + progress bar
 run.py            # CLI
 tests/            # teste offline + gerador de granule sintético
 ```
 
 ## Escala / produção
 
-São ~33 mil hexágonos × 5 anos × ~46 datas — carga pesada. O ganho vem de pagar
-a reprojeção/reamostragem **por tile** (não por hexágono):
-
-| operação cara | sem cache | com cache por tile |
-|---|---|---|
-| reprojeção do tile VIIRS | `N_hex × N_datas × N_anos` | `N_tiles × N_datas` |
-| reamostragem MapBiomas (moda) | `N_hex × N_anos × 2` | `N_tiles × N_anos × 2` |
-
-Como há **milhares de hexágonos por tile** (~10°), as operações pesadas caem
-~1000×. O trabalho por hexágono vira leitura por janela + agregação.
+São ~33 mil hexágonos × 5 anos × ~46 datas — carga pesada. O ganho vem de
+agrupar os hexágonos em **baldes de tiles** (`tiles.tiles_for_geometry`):
+para cada balde (normalmente 1 tile ~10°, cobrindo milhares de hexágonos
+vizinhos) e cada ano, a reprojeção do EVI VIIRS e a reamostragem do MapBiomas
+são feitas **uma única vez em memória** (`process_tile_bucket`) e reusadas
+para todos os hexágonos do balde — o trabalho por hexágono vira recorte por
+janela + agregação. Ao fim do balde/ano, tudo é descartado; nada fica em
+disco entre execuções.
 
 Recomendações:
-- rode a etapa `prepare` (padrão) para materializar os COGs por tile uma vez;
-- o modo `resume` permite retomar; paralelize por lote de hexágonos
-  (multiprocessing/dask) chamando `process_hexagon` em workers distintos —
-  hexágonos do mesmo tile compartilham o cache em disco.
+- o modo `resume` (padrão) pula hexágonos cujo parquet já existe; um balde só
+  é (re)processado se tiver pelo menos um hexágono pendente;
+- para paralelizar, distribua **baldes inteiros** entre workers
+  (multiprocessing/dask) chamando `process_tile_bucket` — assim cada granule
+  VIIRS e cada janela do MapBiomas são baixados/lidos uma só vez por
+  balde/ano, independente de quantos hexágonos ele contém.
 ```

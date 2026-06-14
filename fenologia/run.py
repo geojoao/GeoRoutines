@@ -32,8 +32,6 @@ def main():
     p.add_argument("--output", default=str(config.OUTPUT_DIR), help="Pasta de saída dos parquets.")
     p.add_argument("--limit", type=int, default=None, help="Processa apenas N hexágonos.")
     p.add_argument("--no-resume", action="store_true", help="Reprocessa mesmo se o parquet existir.")
-    p.add_argument("--no-prepare", action="store_true",
-                   help="Não pré-gera os COGs (VIIRS + MapBiomas) por tile antes do loop.")
     args = p.parse_args()
 
     boundary = None
@@ -49,7 +47,6 @@ def main():
         output_dir=args.output,
         limit=args.limit,
         resume=not args.no_resume,
-        prepare=not args.no_prepare,
     )
 
 

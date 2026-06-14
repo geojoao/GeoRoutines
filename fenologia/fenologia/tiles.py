@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import math
 import re
-from functools import lru_cache
 
 import numpy as np
 import xarray as xr
@@ -70,13 +69,26 @@ def tile_latlon_bbox(h: int, v: int) -> tuple[float, float, float, float] | None
     return float(lon[ok].min()), float(lat[ok].min()), float(lon[ok].max()), float(lat[ok].max())
 
 
-@lru_cache(maxsize=2048)
-def tile_grid(h: int, v: int, res: float = config.TARGET_RES_DEG) -> xr.DataArray:
-    """Template (EPSG:4326, alinhado ao lattice global) cobrindo o tile (h, v)."""
-    bbox = tile_latlon_bbox(h, v)
-    if bbox is None:
-        raise ValueError(f"Tile h{h:02d}v{v:02d} fora do globo")
-    return make_target_grid(bbox, res)
+def bucket_grid(
+    tiles_hv: list[tuple[int, int]], res: float = config.TARGET_RES_DEG
+) -> xr.DataArray:
+    """
+    Template (EPSG:4326, alinhado ao lattice global) cobrindo a união dos
+    bboxes lon/lat dos tiles do "balde" ``tiles_hv``.
+
+    É o grid em memória compartilhado por todos os hexágonos cujo conjunto de
+    tiles VIIRS é exatamente ``tiles_hv`` — o EVI e o MapBiomas são lidos uma
+    vez nesse grid e reaproveitados (em memória) por todos eles.
+    """
+    bboxes = [tile_latlon_bbox(h, v) for h, v in tiles_hv]
+    bboxes = [b for b in bboxes if b is not None]
+    if not bboxes:
+        raise ValueError(f"Nenhum tile válido em {tiles_hv}")
+    minx = min(b[0] for b in bboxes)
+    miny = min(b[1] for b in bboxes)
+    maxx = max(b[2] for b in bboxes)
+    maxy = max(b[3] for b in bboxes)
+    return make_target_grid((minx, miny, maxx, maxy), res)
 
 
 def tiles_for_geometry(geom) -> list[tuple[int, int]]:

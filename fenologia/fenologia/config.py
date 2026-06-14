@@ -19,37 +19,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # Pasta com os GeoTIFFs do MapBiomas já baixados.
 MAPBIOMAS_DIR = Path(os.environ.get("MAPBIOMAS_DIR", PROJECT_ROOT / "mapbiomas"))
 
-# Cache local dos granules VIIRS (.h5) baixados/copiados via earthaccess.
-VIIRS_CACHE_DIR = Path(os.environ.get("VIIRS_CACHE_DIR", PROJECT_ROOT / "data" / "viirs_cache"))
-
-# Cache dos rasters JÁ REPROJETADOS/REAMOSTRADOS por tile (EPSG:4326, grid alvo):
-#   - VIIRS EVI por (tile, data)
-#   - MapBiomas por (tile, ano, tipo)
-# É o que elimina o reprocessamento redundante entre hexágonos vizinhos.
-TILE_CACHE_DIR = Path(os.environ.get("TILE_CACHE_DIR", PROJECT_ROOT / "data" / "tile_cache"))
-
 # Saída dos parquets por hexágono.
 OUTPUT_DIR = Path(os.environ.get("FENOLOGIA_OUTPUT_DIR", PROJECT_ROOT / "data" / "output"))
-
-# ---------------------------------------------------------------------------
-# Acesso ao VIIRS (HTTPS x S3 direto)
-# ---------------------------------------------------------------------------
-# Região AWS onde a LP DAAC hospeda o VIIRS no S3. Rodando um notebook/instância
-# NESSA região, o acesso direto ao S3 é in-region (baixa latência, sem egress).
-AWS_REGION = os.environ.get("AWS_REGION", "us-west-2")
-
-# Modo de acesso ao VIIRS:
-#   "auto"     -> S3 direto quando o ambiente parece in-region (AWS_REGION ==
-#                 região da LP DAAC, ou o earthaccess detecta execução in-region);
-#                 caso contrário, baixa via HTTPS (comportamento histórico local).
-#   "s3"       -> força o acesso direto ao S3 (use ao rodar em us-west-2).
-#   "download" -> baixa via HTTPS para o cache local (.h5).
-VIIRS_ACCESS_MODE = os.environ.get("VIIRS_ACCESS_MODE", "auto")
-
-# No modo S3, por padrão copiamos o granule do S3 para o cache local e lemos com
-# h5py do disco (robusto; leituras HDF5 sobre fsspec costumam ser lentas).
-# ``VIIRS_S3_STREAM=1`` lê o objeto S3 direto via file-like (sem cópia local).
-VIIRS_S3_STREAM = os.environ.get("VIIRS_S3_STREAM", "").lower() in ("1", "true", "yes")
 
 # Boundary do Brasil (vetor) usado para gerar o grid H3. Opcional: se não
 # existir, o grid pode ser gerado a partir de um bbox (ver fenologia.grid).

@@ -1,24 +1,28 @@
 """
-Teste offline ponta-a-ponta (sem credenciais NASA), com a arquitetura por TILES.
+Teste offline ponta-a-ponta (sem credenciais NASA), com a arquitetura por
+"balde de tiles" (sem cache em disco).
 
 Valida:
 1. Leitor de HDF-EOS5 senoidal (read_evi_tile) + georreferência.
-2. Cache por (tile, data) do VIIRS + montagem do cubo (build_daily_cube com
-   search/download monkeypatched para devolver granules sintéticos).
-3. Cache por (tile, ano, tipo) do MapBiomas via WarpedVRT (mode) + leitura por
-   janela.
-4. Extração das séries de EVI por classe no formato WIDE (process_hexagon).
+2. tiles_for_geometry / bucket_grid.
+3. build_tile_cube (busca + abertura de granules + reprojeção, tudo em
+   memória, com download/open monkeypatched para granules sintéticos).
+4. Leitura do MapBiomas direto via WarpedVRT (sem cache em disco).
+5. Extração das séries de EVI por classe no formato WIDE
+   (pipeline.process_tile_bucket).
 
-Para manter o teste rápido, ``tiles.tile_grid`` é encurtado (monkeypatch) para a
-região do hexágono — assim o WarpedVRT do MapBiomas reamostra só um pedacinho,
-mas todo o caminho de cache é exercitado. O granule sintético usa o EXTENT REAL
-do tile (h12v10).
+Para manter o teste rápido, ``tiles.tile_latlon_bbox`` é encurtado
+(monkeypatch) para a região do hexágono — assim ``bucket_grid``/
+``tiles_for_geometry`` operam num grid pequeno, mas todo o caminho de
+download->leitura->reprojeção->extração é exercitado. O granule sintético usa
+o EXTENT REAL do tile (h12v10).
 """
 from __future__ import annotations
 
 import datetime as dt
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -27,30 +31,41 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from fenologia import config  # noqa: E402
-
-# cache de teste isolado
-config.TILE_CACHE_DIR = ROOT / "data" / "_test_tile_cache"
-shutil.rmtree(config.TILE_CACHE_DIR, ignore_errors=True)
-
 from fenologia import extract, mapbiomas, pipeline, tiles, viirs  # noqa: E402
 from fenologia.grid import cell_to_polygon  # noqa: E402
-from fenologia.rasterutils import make_target_grid  # noqa: E402
 from tests.make_synthetic_granule import make_synthetic_vnp13a1  # noqa: E402
 
 HEX = "858b8633fffffff"  # Sorriso-MT (soja/algodão/outras temporárias)
 TMP = ROOT / "data" / "_test_cache"
 H, V = 12, 10  # tile VIIRS que contém o hexágono
 
-# Encurta tile_grid para a região do hexágono (rápido, mas exercita o cache).
+shutil.rmtree(TMP, ignore_errors=True)
+
+# Encurta tile_latlon_bbox para a região do hexágono (rápido, mas exercita o
+# fluxo real de bucket_grid/tiles_for_geometry).
 _geom = cell_to_polygon(HEX)
 _b = config.BBOX_BUFFER_DEG
 _minx, _miny, _maxx, _maxy = _geom.bounds
-_SMALL_GRID = make_target_grid((_minx - _b, _miny - _b, _maxx + _b, _maxy + _b))
-tiles.tile_grid = lambda h, v, res=config.TARGET_RES_DEG: _SMALL_GRID
+_SMALL_BBOX = (_minx - _b, _miny - _b, _maxx + _b, _maxy + _b)
+
+tiles.tile_latlon_bbox = lambda h, v: _SMALL_BBOX if (h, v) == (H, V) else None
 
 
-def _template():
-    return make_target_grid((_minx - _b, _miny - _b, _maxx + _b, _maxy + _b))
+def _bucket_template():
+    return tiles.bucket_grid([(H, V)])
+
+
+class _FakeGranuleFile:
+    """Stand-in p/ o file-like devolvido por earthaccess.open (lê de um .h5 local)."""
+
+    def __init__(self, path: Path):
+        self._f = open(path, "rb")
+
+    def read(self, *args, **kwargs):
+        return self._f.read(*args, **kwargs)
+
+    def close(self):
+        self._f.close()
 
 
 def _fake_granules(prefix="t"):
@@ -63,6 +78,20 @@ def _fake_granules(prefix="t"):
         grans.append({"umm": {"GranuleUR": ur}})
         paths[ur] = make_synthetic_vnp13a1(TMP / f"{ur}.h5", H, V, season=s, seed=k)
     return grans, paths
+
+
+def _patch_viirs_network(grans, paths):
+    """Monkeypatch search_granules_bbox + open_granule p/ granules sintéticos."""
+    orig_search = viirs.search_granules_bbox
+    orig_open = viirs.open_granule
+    viirs.search_granules_bbox = lambda bbox, start, end: list(grans)
+    viirs.open_granule = lambda g: _FakeGranuleFile(paths[viirs.granule_ur(g)])
+
+    def _restore():
+        viirs.search_granules_bbox = orig_search
+        viirs.open_granule = orig_open
+
+    return _restore
 
 
 def test_read_tile_georef():
@@ -80,51 +109,44 @@ def test_tiles_for_geometry():
     print(f"[2] tiles_for_geometry OK | tiles={hv}")
 
 
-def test_build_cube_cached():
+def test_build_tile_cube():
     grans, paths = _fake_granules("c")
-    template = _template()
-    os_, od = viirs.search_granules_bbox, viirs.download_granules
-    viirs.search_granules_bbox = lambda bbox, start, end: list(grans)
-    viirs.download_granules = lambda granules, cache_dir=None: dict(paths)
+    template = _bucket_template()
+    restore = _patch_viirs_network(grans, paths)
     try:
-        cube = viirs.build_daily_cube(_geom, "2024-01-01", "2024-12-31", template)
+        with tempfile.TemporaryDirectory() as tmp:
+            cube = viirs.build_tile_cube([(H, V)], 2024, template, Path(tmp), "test")
     finally:
-        viirs.search_granules_bbox, viirs.download_granules = os_, od
+        restore()
 
     assert cube is not None and cube.dims == ("time", "y", "x")
     assert cube.sizes["time"] == 6
-    # COGs por (tile,data) materializados em cache
-    cogs = sorted((config.TILE_CACHE_DIR / "viirs" / f"h{H:02d}v{V:02d}").glob("*.tif"))
-    assert len(cogs) == 6, f"esperava 6 COGs VIIRS, achei {len(cogs)}"
     means = [float(np.nanmean(cube.isel(time=t).values)) for t in range(6)]
     assert means[3] == max(means)
-    print(f"[3] build_daily_cube (cache) OK | grid={cube.sizes['y']}x{cube.sizes['x']} "
-          f"cogs={len(cogs)} medias={[round(m,3) for m in means]}")
+    print(f"[3] build_tile_cube OK | grid={cube.sizes['y']}x{cube.sizes['x']} "
+          f"medias={[round(m, 3) for m in means]}")
 
 
-def test_mapbiomas_cache():
-    template = _template()
-    cov = mapbiomas.read_mapbiomas_on_grid(2024, "coverage", template, [(H, V)])
-    sec = mapbiomas.read_mapbiomas_on_grid(2024, "second_crop", template, [(H, V)])
+def test_mapbiomas_no_cache():
+    template = _bucket_template()
+    cov = mapbiomas.read_mapbiomas_on_grid(2024, "coverage", template)
+    sec = mapbiomas.read_mapbiomas_on_grid(2024, "second_crop", template)
     assert cov.sizes == template.sizes
-    cog = mapbiomas.mapbiomas_tile_cog_path(H, V, 2024, "coverage")
-    assert cog.exists(), "COG do MapBiomas não foi cacheado"
     cov_classes = sorted(set(np.unique(cov.values).tolist()))
     assert set(config.COVERAGE_AGRI_CLASSES) & set(cov_classes)
-    print(f"[4] mapbiomas cache OK | cobertura={cov_classes} "
+    print(f"[4] mapbiomas (sem cache) OK | cobertura={cov_classes} "
           f"safrinha={sorted(set(np.unique(sec.values).tolist()))}")
 
 
 def test_full_pipeline_wide():
     grans, paths = _fake_granules("f")
-    os_, od = viirs.search_granules_bbox, viirs.download_granules
-    viirs.search_granules_bbox = lambda bbox, start, end: list(grans)
-    viirs.download_granules = lambda granules, cache_dir=None: dict(paths)
+    restore = _patch_viirs_network(grans, paths)
     try:
-        df = pipeline.process_hexagon(HEX, years=[2024])
+        results = pipeline.process_tile_bucket([HEX], [(H, V)], years=[2024])
     finally:
-        viirs.search_granules_bbox, viirs.download_granules = os_, od
+        restore()
 
+    df = results[HEX]
     assert len(df) > 0
     assert {"id_hexagono", "data"} <= set(df.columns)
     assert df["data"].is_unique and df["data"].nunique() == 6
@@ -144,7 +166,7 @@ def test_full_pipeline_wide():
         for c in df.columns
         if c.startswith("evi_medio_") and df[c].notna().any()
     )
-    print(f"[5] process_hexagon (WIDE) OK | linhas={len(df)} datas={df['data'].nunique()} "
+    print(f"[5] process_tile_bucket (WIDE) OK | linhas={len(df)} datas={df['data'].nunique()} "
           f"colunas={len(df.columns)} classes_com_dado={classes}")
     show = ["id_hexagono", "data"]
     for name in classes:
@@ -156,7 +178,7 @@ def test_full_pipeline_wide():
 if __name__ == "__main__":
     test_read_tile_georef()
     test_tiles_for_geometry()
-    test_build_cube_cached()
-    test_mapbiomas_cache()
+    test_build_tile_cube()
+    test_mapbiomas_no_cache()
     df = test_full_pipeline_wide()
     print("\n=== TODOS OS TESTES OFFLINE PASSARAM ===")

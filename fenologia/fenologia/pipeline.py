@@ -1,14 +1,23 @@
 """
-Orquestração: processa um hexágono (todos os anos) e roda o grid completo.
+Orquestração: agrupa hexágonos por "balde de tiles" VIIRS e processa cada
+balde (todos os hexágonos, todos os anos) sem nenhum cache em disco.
 
-Etapas (para dividir o trabalho e maximizar reuso de cache):
-- ``prepare_tiles`` / ``prepare_mapbiomas``: pré-geram os COGs por tile (passo
-  pesado e reaproveitável), com progress bar.
-- ``process_hexagon`` / ``run``: leitura por janela (barata) + extração.
+Para cada balde de tiles (``tiles_for_geometry`` igual para um conjunto de
+hexágonos vizinhos):
+- monta um grid (``tiles.bucket_grid``) cobrindo a união dos tiles do balde;
+- para cada ano, baixa/reprojeta o EVI VIIRS UMA VEZ para esse grid (em
+  memória; o ``.h5`` de cada granule é temporário e apagado na hora — ver
+  ``fenologia.viirs.build_tile_cube``) e lê o MapBiomas (coverage + safrinha)
+  direto nesse grid (``fenologia.mapbiomas.read_mapbiomas_on_grid``, também
+  sem cache em disco);
+- recorta esses dados (em memória) à janela de cada hexágono do balde e
+  extrai as séries de EVI por classe (``fenologia.extract``).
 """
 from __future__ import annotations
 
+import tempfile
 import time
+from collections import defaultdict
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
@@ -20,7 +29,6 @@ from tqdm import tqdm
 
 from . import config, extract, mapbiomas, tiles, viirs
 from .grid import cell_to_polygon
-from .rasterutils import make_target_grid
 
 
 def _clip_to_hex(da, geom):
@@ -28,32 +36,37 @@ def _clip_to_hex(da, geom):
     return da.rio.clip([mapping(geom)], crs="EPSG:4326", drop=False, all_touched=True)
 
 
-def process_hexagon(
-    hex_id: str,
-    years: Sequence[int] = tuple(config.YEARS),
-    cache_dir: Path | str = None,
-    res_deg: float = config.TARGET_RES_DEG,
-) -> pd.DataFrame:
-    """
-    Processa um único hexágono H3: para cada ano, monta o cubo VIIRS, lê o
-    MapBiomas (cobertura + safrinha) do cache por tile e extrai as séries de EVI
-    por classe (formato wide).
-    """
+def _hex_window(hex_id: str) -> tuple[float, float, float, float]:
     geom = cell_to_polygon(hex_id)
     minx, miny, maxx, maxy = geom.bounds
     b = config.BBOX_BUFFER_DEG
-    bounds = (minx - b, miny - b, maxx + b, maxy + b)
-    template = make_target_grid(bounds, res_deg)
+    return minx - b, miny - b, maxx + b, maxy + b
 
-    # Tiles que cobrem o hexágono (mesmos para VIIRS e MapBiomas).
-    tiles_hv = tiles.tiles_for_geometry(geom)
 
-    frames = []
+def process_tile_bucket(
+    hex_ids: Sequence[str],
+    tiles_hv: Sequence[tuple[int, int]],
+    years: Sequence[int] = tuple(config.YEARS),
+    res_deg: float = config.TARGET_RES_DEG,
+) -> dict[str, pd.DataFrame]:
+    """
+    Processa todos os ``hex_ids`` cujo conjunto de tiles VIIRS é ``tiles_hv``.
+
+    Para cada ano, monta o cubo VIIRS e lê o MapBiomas (cobertura + safrinha)
+    uma única vez no grid do balde, e então extrai as séries de EVI por classe
+    para cada hexágono (formato wide).
+
+    Retorna ``{hex_id: DataFrame wide}`` (DataFrame vazio com o schema wide se
+    o hexágono não tiver dados).
+    """
+    template = tiles.bucket_grid(tiles_hv, res_deg)
+    label = "+".join(f"h{h:02d}v{v:02d}" for h, v in tiles_hv)
+
+    frames_by_hex: dict[str, list[pd.DataFrame]] = defaultdict(list)
+
     for year in years:
-        cube = viirs.build_daily_cube(
-            geom, f"{year}-01-01", f"{year}-12-31", template,
-            tiles_hv=tiles_hv, cache_dir=cache_dir,
-        )
+        with tempfile.TemporaryDirectory(prefix="fenologia_") as tmp:
+            cube = viirs.build_tile_cube(list(tiles_hv), year, template, Path(tmp), f"{label} {year}")
         if cube is None:
             continue
 
@@ -65,72 +78,41 @@ def process_hexagon(
         if cube.sizes["time"] == 0:
             continue
 
-        # MapBiomas no grid do VIIRS (do cache por tile), recortado ao hexágono.
-        cov = _clip_to_hex(
-            mapbiomas.read_mapbiomas_on_grid(year, "coverage", template, tiles_hv), geom
-        )
-        sec = _clip_to_hex(
-            mapbiomas.read_mapbiomas_on_grid(year, "second_crop", template, tiles_hv), geom
-        )
+        cov = mapbiomas.read_mapbiomas_on_grid(year, "coverage", template)
+        sec = mapbiomas.read_mapbiomas_on_grid(year, "second_crop", template)
 
-        df_cov = extract.extract_class_series(
-            cube, cov, config.COVERAGE_AGRI_CLASSES,
-            hex_id=hex_id, year=year, source="coverage", res_deg=res_deg,
-        )
-        df_sec = extract.extract_class_series(
-            cube, sec, config.SECOND_CROP_CLASSES,
-            hex_id=hex_id, year=year, source="second_crop", res_deg=res_deg,
-        )
-        if len(df_cov):
-            frames.append(df_cov)
-        if len(df_sec):
-            frames.append(df_sec)
+        for hex_id in hex_ids:
+            geom = cell_to_polygon(hex_id)
+            window = _hex_window(hex_id)
 
-    if not frames:
-        return extract.to_wide(None)  # DataFrame vazio com o schema wide
-    df_long = pd.concat(frames, ignore_index=True)
-    return extract.to_wide(df_long)
+            cube_hex = cube.rio.clip_box(*window)
+            cov_hex = _clip_to_hex(cov.rio.clip_box(*window), geom)
+            sec_hex = _clip_to_hex(sec.rio.clip_box(*window), geom)
 
+            df_cov = extract.extract_class_series(
+                cube_hex, cov_hex, config.COVERAGE_AGRI_CLASSES,
+                hex_id=hex_id, year=year, source="coverage", res_deg=res_deg,
+            )
+            df_sec = extract.extract_class_series(
+                cube_hex, sec_hex, config.SECOND_CROP_CLASSES,
+                hex_id=hex_id, year=year, source="second_crop", res_deg=res_deg,
+            )
+            if len(df_cov):
+                frames_by_hex[hex_id].append(df_cov)
+            if len(df_sec):
+                frames_by_hex[hex_id].append(df_sec)
 
-# ---------------------------------------------------------------------------
-# Etapa de preparação (pesada, uma vez) — caches por tile
-# ---------------------------------------------------------------------------
-def prepare_mapbiomas(tiles_hv: Iterable[tuple[int, int]], years: Sequence[int]) -> None:
-    """Pré-gera os COGs do MapBiomas (cobertura + safrinha) por (tile, ano)."""
-    tiles_hv = list(tiles_hv)
-    jobs = [(h, v, y, k) for (h, v) in tiles_hv for y in years for k in ("coverage", "second_crop")]
-    for h, v, y, k in tqdm(jobs, desc="MapBiomas (tile,ano,tipo)", unit="job"):
-        try:
-            mapbiomas.ensure_mapbiomas_tile_cog(h, v, y, k)
-        except Exception as exc:
-            tqdm.write(f"[mapbiomas h{h:02d}v{v:02d} {y} {k}] ERRO {exc!r}")
+        # `cube`, `cov`, `sec` saem de escopo aqui (próximo ano descarta e
+        # reconstrói) — nada fica retido em memória entre baldes/anos.
 
-
-def prepare_viirs(
-    tiles_hv: Iterable[tuple[int, int]],
-    years: Sequence[int],
-    cache_dir: Path | str = None,
-) -> None:
-    """
-    Pré-gera os COGs de EVI do VIIRS por (tile, ano): aqui acontece TODA a rede
-    (busca CMR + download dos .h5) e a reprojeção -> COG, uma única vez por tile.
-    Depois, o processamento por hexágono é local e rápido.
-    """
-    tiles_hv = list(tiles_hv)
-    jobs = [(h, v, y) for (h, v) in tiles_hv for y in years]
-    for h, v, y in tqdm(jobs, desc="VIIRS (tile,ano)", unit="job"):
-        try:
-            viirs.ensure_tile_year_viirs(h, v, y, cache_dir)
-        except Exception as exc:
-            tqdm.write(f"[viirs h{h:02d}v{v:02d} {y}] ERRO {exc!r}")
-
-
-def tiles_for_hexagons(hex_ids: Iterable[str]) -> list[tuple[int, int]]:
-    """União dos tiles que cobrem uma lista de hexágonos."""
-    seen: set[tuple[int, int]] = set()
-    for hid in hex_ids:
-        seen.update(tiles.tiles_for_geometry(cell_to_polygon(hid)))
-    return sorted(seen)
+    result: dict[str, pd.DataFrame] = {}
+    for hex_id in hex_ids:
+        frames = frames_by_hex.get(hex_id)
+        if frames:
+            result[hex_id] = extract.to_wide(pd.concat(frames, ignore_index=True))
+        else:
+            result[hex_id] = extract.to_wide(None)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +126,6 @@ def run(
     hex_ids: Optional[Iterable[str]] = None,
     limit: Optional[int] = None,
     resume: bool = True,
-    prepare: bool = True,
 ) -> None:
     """
     Roda o pipeline para um conjunto de hexágonos.
@@ -153,10 +134,11 @@ def run(
       ``boundary`` (GeoDataFrame) ou ``bbox``.
     - ``limit`` processa apenas os N primeiros (útil p/ teste).
     - ``resume`` pula hexágonos cujo parquet já existe.
-    - ``prepare`` pré-gera os COGs do MapBiomas por tile antes do loop.
 
-    Salva um parquet por hexágono em ``output_dir`` e mostra progress bar com o
-    tempo médio por hexágono.
+    Os hexágonos são agrupados em "baldes" pelo conjunto de tiles VIIRS que os
+    cobrem (``tiles.tiles_for_geometry``); cada balde é processado de uma vez
+    (sem cache em disco — ver ``process_tile_bucket``) e gera um parquet por
+    hexágono em ``output_dir``.
     """
     from .grid import build_h3_grid
 
@@ -170,43 +152,48 @@ def run(
     if limit:
         hex_ids = hex_ids[:limit]
 
-    # Pré-geração (passo pesado, uma vez por tile e reaproveitado por todos os
-    # hexágonos): VIIRS (toda a rede aqui) + MapBiomas (mode-resample 30m->463m).
-    if prepare:
-        tiles_hv = tiles_for_hexagons(hex_ids)
-        n_years = len(list(years))
-        print(f"Preparando {len(tiles_hv)} tiles x {n_years} anos (VIIRS + MapBiomas)...")
-        prepare_viirs(tiles_hv, years)
-        prepare_mapbiomas(tiles_hv, years)
+    buckets: dict[tuple[tuple[int, int], ...], list[str]] = defaultdict(list)
+    for hex_id in hex_ids:
+        tiles_hv = tuple(sorted(tiles.tiles_for_geometry(cell_to_polygon(hex_id))))
+        buckets[tiles_hv].append(hex_id)
 
     n_written = n_skip = n_empty = n_err = 0
-    bar = tqdm(hex_ids, desc="Hexágonos", unit="hex")
-    for hex_id in bar:
-        out_path = output_dir / f"evi_{hex_id}.parquet"
-        if resume and out_path.exists():
-            n_skip += 1
-            bar.set_postfix_str(f"{hex_id}: já existe (cache)")
+    bar = tqdm(buckets.items(), desc="Tiles", unit="balde")
+    for tiles_hv, bucket_hex_ids in bar:
+        label = "+".join(f"h{h:02d}v{v:02d}" for h, v in tiles_hv)
+
+        pending = [
+            hex_id for hex_id in bucket_hex_ids
+            if not (resume and (output_dir / f"evi_{hex_id}.parquet").exists())
+        ]
+        if not pending:
+            n_skip += len(bucket_hex_ids)
+            bar.set_postfix_str(f"{label}: {len(bucket_hex_ids)} já existiam (cache)")
             continue
+
         t0 = time.time()
         try:
-            df = process_hexagon(hex_id, years=years)
+            results = process_tile_bucket(pending, tiles_hv, years=years)
         except Exception as exc:
-            n_err += 1
-            tqdm.write(f"[{hex_id}] ERRO {exc!r}")
+            n_err += len(pending)
+            tqdm.write(f"[{label}] ERRO {exc!r}")
             continue
         dt_s = time.time() - t0
-        if len(df):
-            df.to_parquet(out_path, index=False)
-            n_written += 1
-            bar.set_postfix_str(f"{hex_id}: {len(df)} linhas, {dt_s:.1f}s/hex")
-        else:
-            n_empty += 1
-            bar.set_postfix_str(f"{hex_id}: sem agricultura, {dt_s:.1f}s/hex")
+
+        n_skip += len(bucket_hex_ids) - len(pending)
+        for hex_id, df in results.items():
+            out_path = output_dir / f"evi_{hex_id}.parquet"
+            if len(df):
+                df.to_parquet(out_path, index=False)
+                n_written += 1
+            else:
+                n_empty += 1
+        bar.set_postfix_str(f"{label}: {len(pending)} hex, {dt_s:.1f}s")
 
     print(
-        f"Concluído ({len(hex_ids)} hexágonos): {n_written} novos, "
-        f"{n_skip} já existiam, {n_empty} sem agricultura, {n_err} erros. "
-        f"Saída em {output_dir}"
+        f"Concluído ({len(hex_ids)} hexágonos, {len(buckets)} baldes de tiles): "
+        f"{n_written} novos, {n_skip} já existiam, {n_empty} sem agricultura, "
+        f"{n_err} erros. Saída em {output_dir}"
     )
     if n_skip and not n_written and not n_empty:
         print("Todos os hexágonos já estavam processados. "
