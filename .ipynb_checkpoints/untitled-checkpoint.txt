@@ -1,0 +1,6 @@
+*.tif
+*.tiff
+*.COG
+*.cog
+*.geotif
+*.geotiff

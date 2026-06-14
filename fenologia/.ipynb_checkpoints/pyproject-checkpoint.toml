@@ -1,0 +1,25 @@
+[project]
+name = "fenologia-brazil"
+version = "0.1.0"
+description = "Séries temporais de EVI (VIIRS/VNP13A1) por classe de agricultura do MapBiomas, agregadas por hexágono H3 (res. 5) no Brasil."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "affine>=2.4.0",
+    "coiled>=1.135.0",
+    "earthaccess>=0.18.0",
+    "geopandas>=1.1.3",
+    "h3>=4.5.0",
+    "h5py>=3.16.0",
+    "jupyter-server-proxy>=4.5.0",
+    "jupyterlab>=4.5.8",
+    "numpy>=2.4.6",
+    "pandas>=3.0.3",
+    "pyarrow>=24.0.0",
+    "pyproj>=3.7.2",
+    "rasterio>=1.5.0",
+    "rioxarray>=0.22.0",
+    "shapely>=2.1.2",
+    "tqdm>=4.68.2",
+    "xarray>=2026.4.0",
+]
