@@ -173,7 +173,7 @@ def _fetch_granule_to_temp(granule, tmp_dir: Path, label: str) -> Path:
     dest = tmp_dir / f"{granule_ur(granule)}.h5"
     try:
         with open(dest, "wb") as out:
-            shutil.copyfileobj(fobj, out, length=8 * 1024 * 1024)
+            shutil.copyfileobj(fobj, out)
     finally:
         try:
             fobj.close()
@@ -326,15 +326,17 @@ def build_tile_cube(
     for date in sorted(by_date):
         tile_arrays = []
         for g in by_date[date]:
-            h5_path = _fetch_granule_to_temp(g, tmp_dir, f"{label} {date}")
+            h5_path = None
             try:
+                h5_path = _fetch_granule_to_temp(g, tmp_dir, f"{label} {date}")
                 da = read_evi_tile(h5_path)
                 da_ll = da.rio.reproject_match(template, resampling=Resampling.nearest)
                 tile_arrays.append(da_ll)
             except Exception as exc:
                 tqdm.write(f"    [aviso] {label} {date} {granule_ur(g)}: {exc!r}")
             finally:
-                h5_path.unlink(missing_ok=True)
+                if h5_path is not None:
+                    h5_path.unlink(missing_ok=True)
         if not tile_arrays:
             continue
         mosaic = tile_arrays[0]

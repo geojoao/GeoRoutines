@@ -60,7 +60,7 @@ def process_tile_bucket(
     o hexágono não tiver dados).
     """
     template = tiles.bucket_grid(tiles_hv, res_deg)
-    label = "+".join(f"h{h:02d}v{v:02d}" for h, v in tiles_hv)
+    label = tiles.bucket_label(tiles_hv)
 
     frames_by_hex: dict[str, list[pd.DataFrame]] = defaultdict(list)
 
@@ -116,6 +116,34 @@ def process_tile_bucket(
 
 
 # ---------------------------------------------------------------------------
+# Saída: um parquet por balde (em ``_parts/``) + concatenação final
+# ---------------------------------------------------------------------------
+def _part_path(output_dir: Path, label: str) -> Path:
+    return output_dir / "_parts" / f"balde_{label}.parquet"
+
+
+def concat_parts(output_dir: Path | str, filename: str = "evi_brazil.parquet") -> Path:
+    """
+    Concatena todos os parquets de ``_parts/`` (um por balde de tiles, já
+    escrito) num único parquet final ``output_dir/filename``.
+
+    Pode ser chamada a qualquer momento — inclusive com ``run`` ainda em
+    andamento — para obter um snapshot parcial do resultado.
+    """
+    output_dir = Path(output_dir)
+    parts = sorted((output_dir / "_parts").glob("*.parquet"))
+    frames = [df for df in (pd.read_parquet(p) for p in parts) if len(df)]
+    if frames:
+        full = pd.concat(frames, ignore_index=True)
+        full = full.sort_values(["id_hexagono", "data"]).reset_index(drop=True)
+    else:
+        full = pd.DataFrame(columns=extract.full_wide_columns())
+    out_path = output_dir / filename
+    full.to_parquet(out_path, index=False)
+    return out_path
+
+
+# ---------------------------------------------------------------------------
 # Execução em lote
 # ---------------------------------------------------------------------------
 def run(
@@ -133,17 +161,21 @@ def run(
     - Se ``hex_ids`` for dado, usa essa lista; senão gera o grid a partir de
       ``boundary`` (GeoDataFrame) ou ``bbox``.
     - ``limit`` processa apenas os N primeiros (útil p/ teste).
-    - ``resume`` pula hexágonos cujo parquet já existe.
+    - ``resume`` pula baldes cujo parquet em ``_parts/`` já existe.
 
     Os hexágonos são agrupados em "baldes" pelo conjunto de tiles VIIRS que os
     cobrem (``tiles.tiles_for_geometry``); cada balde é processado de uma vez
-    (sem cache em disco — ver ``process_tile_bucket``) e gera um parquet por
-    hexágono em ``output_dir``.
+    (sem cache em disco — ver ``process_tile_bucket``) e o resultado de TODOS
+    os seus hexágonos (mesmo os sem agricultura, com 0 linhas) é gravado em
+    ``output_dir/_parts/balde_<label>.parquet`` — esse arquivo é o marcador de
+    "balde concluído" usado pelo ``resume``. Ao final, todos os baldes são
+    concatenados num único ``output_dir/evi_brazil.parquet``
+    (``concat_parts``).
     """
     from .grid import build_h3_grid
 
     output_dir = Path(output_dir or config.OUTPUT_DIR)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "_parts").mkdir(parents=True, exist_ok=True)
 
     if hex_ids is None:
         grid = build_h3_grid(boundary=boundary, bbox=bbox, resolution=config.H3_RESOLUTION)
@@ -160,41 +192,41 @@ def run(
     n_written = n_skip = n_empty = n_err = 0
     bar = tqdm(buckets.items(), desc="Tiles", unit="balde")
     for tiles_hv, bucket_hex_ids in bar:
-        label = "+".join(f"h{h:02d}v{v:02d}" for h, v in tiles_hv)
+        label = tiles.bucket_label(tiles_hv)
+        part_path = _part_path(output_dir, label)
 
-        pending = [
-            hex_id for hex_id in bucket_hex_ids
-            if not (resume and (output_dir / f"evi_{hex_id}.parquet").exists())
-        ]
-        if not pending:
+        if resume and part_path.exists():
             n_skip += len(bucket_hex_ids)
-            bar.set_postfix_str(f"{label}: {len(bucket_hex_ids)} já existiam (cache)")
+            bar.set_postfix_str(f"{label}: já existia (cache)")
             continue
 
         t0 = time.time()
         try:
-            results = process_tile_bucket(pending, tiles_hv, years=years)
+            results = process_tile_bucket(bucket_hex_ids, tiles_hv, years=years)
         except Exception as exc:
-            n_err += len(pending)
+            n_err += len(bucket_hex_ids)
             tqdm.write(f"[{label}] ERRO {exc!r}")
             continue
         dt_s = time.time() - t0
 
-        n_skip += len(bucket_hex_ids) - len(pending)
-        for hex_id, df in results.items():
-            out_path = output_dir / f"evi_{hex_id}.parquet"
-            if len(df):
-                df.to_parquet(out_path, index=False)
-                n_written += 1
-            else:
-                n_empty += 1
-        bar.set_postfix_str(f"{label}: {len(pending)} hex, {dt_s:.1f}s")
+        frames = [df for df in results.values() if len(df)]
+        n_written += len(frames)
+        n_empty += len(bucket_hex_ids) - len(frames)
+        bucket_df = (
+            pd.concat(frames, ignore_index=True)
+            if frames
+            else pd.DataFrame(columns=extract.full_wide_columns())
+        )
+        bucket_df.to_parquet(part_path, index=False)
+        bar.set_postfix_str(f"{label}: {len(bucket_hex_ids)} hex, {dt_s:.1f}s")
 
+    out_path = concat_parts(output_dir)
     print(
         f"Concluído ({len(hex_ids)} hexágonos, {len(buckets)} baldes de tiles): "
-        f"{n_written} novos, {n_skip} já existiam, {n_empty} sem agricultura, "
-        f"{n_err} erros. Saída em {output_dir}"
+        f"{n_written} com agricultura, {n_skip} hex em baldes já concluídos, "
+        f"{n_empty} sem agricultura, {n_err} erros. Saída em {out_path}"
     )
-    if n_skip and not n_written and not n_empty:
-        print("Todos os hexágonos já estavam processados. "
-              "Use --no-resume para refazer, ou apague os parquets em questão.")
+    if n_skip and not n_written and not n_empty and not n_err:
+        print("Todos os baldes já estavam concluídos. "
+              "Use --no-resume para refazer, ou apague os parquets em "
+              f"{output_dir / '_parts'}.")

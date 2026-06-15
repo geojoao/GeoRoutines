@@ -91,6 +91,11 @@ def bucket_grid(
     return make_target_grid((minx, miny, maxx, maxy), res)
 
 
+def bucket_label(tiles_hv: list[tuple[int, int]]) -> str:
+    """Identificador legível do balde, ex.: ``h12v09+h13v09``."""
+    return "+".join(f"h{h:02d}v{v:02d}" for h, v in tiles_hv)
+
+
 def tiles_for_geometry(geom) -> list[tuple[int, int]]:
     """
     Tiles (h, v) que cobrem a geometria (Polygon em EPSG:4326).

@@ -38,7 +38,16 @@ agricultura e agrega **no espaço** → média / mínimo / p25 / p75 por data
 (`fenologia/extract.py`). Ao fim do ano, tudo é descartado antes do próximo
 balde/ano.
 
-Saída: um **parquet por hexágono** no formato *wide* (uma linha por data).
+### Saída
+
+Cada balde gera **um parquet** com os dados (formato *wide*, uma linha por
+`(id_hexagono, data)`) de **todos** os hexágonos do balde, em
+`data/output/_parts/balde_<label>.parquet` (ex.: `balde_h12v08.parquet`,
+`balde_h12v09+h13v09.parquet`) — inclusive quando nenhum hexágono do balde tem
+agricultura (parquet com 0 linhas), pois esse arquivo também é o **marcador de
+balde concluído** usado pelo `resume`. Ao final da execução (ou a qualquer
+momento, via `fenologia.pipeline.concat_parts`), todos os `_parts/*.parquet`
+são concatenados num único `data/output/evi_brazil.parquet`.
 
 ### As duas fontes do MapBiomas por ano
 
@@ -146,8 +155,11 @@ tiles_hv = tuple(sorted(tiles_for_geometry(cell_to_polygon(hex_id))))
 df = process_tile_bucket([hex_id], tiles_hv, years=[2024])[hex_id]
 ```
 
-Os parquets são salvos em `data/output/evi_{hexagono}.parquet`. O modo `resume`
-(padrão) pula hexágonos já processados.
+Resultado final em `data/output/evi_brazil.parquet` (todos os hexágonos e
+anos, num único parquet). O modo `resume` (padrão) pula **baldes** cujo
+`data/output/_parts/balde_<label>.parquet` já existe — um balde só é
+(re)processado se ainda não tiver sido concluído (`--no-resume` força
+reprocessar tudo).
 
 ### Grid H3 do Brasil
 
@@ -208,8 +220,13 @@ janela + agregação. Ao fim do balde/ano, tudo é descartado; nada fica em
 disco entre execuções.
 
 Recomendações:
-- o modo `resume` (padrão) pula hexágonos cujo parquet já existe; um balde só
-  é (re)processado se tiver pelo menos um hexágono pendente;
+- o modo `resume` (padrão) pula **baldes** cujo `_parts/balde_<label>.parquet`
+  já existe (inclusive baldes sem agricultura, que geram um parquet de 0
+  linhas só como marcador) — assim uma execução interrompida não reprocessa
+  baldes já concluídos;
+- para acompanhar o progresso sem esperar o fim da execução, chame
+  `fenologia.pipeline.concat_parts("data/output")` a qualquer momento — gera
+  um snapshot de `evi_brazil.parquet` com os baldes já concluídos até então;
 - para paralelizar, distribua **baldes inteiros** entre workers
   (multiprocessing/dask) chamando `process_tile_bucket` — assim cada granule
   VIIRS e cada janela do MapBiomas são baixados/lidos uma só vez por
