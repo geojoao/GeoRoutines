@@ -4,3 +4,4 @@
 *.cog
 *.geotif
 *.geotiff
+fenologia/data/output/evi_brazil.parquet
