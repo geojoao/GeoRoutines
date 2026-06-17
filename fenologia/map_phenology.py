@@ -85,36 +85,85 @@ def get_brazil_outline() -> gpd.GeoDataFrame:
     return world[world["name"] == "Brazil"]
 
 
-def make_doy_colormap():
-    return plt.cm.twilight_shifted
+CMAP_PLANTIO = plt.cm.YlOrRd   # amarelo → laranja → vermelho (início do ciclo)
+CMAP_COLHEITA = plt.cm.GnBu    # verde → azul (fim do ciclo)
 
 
-def plot_phenology_map(gdf: gpd.GeoDataFrame, doy_col: str, title_line1: str,
-                       title_line2: str, brazil: gpd.GeoDataFrame,
-                       ax: plt.Axes, cmap):
-    vmin, vmax = 1, 365
-    norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
-    gdf.plot(column=doy_col, ax=ax, cmap=cmap, norm=norm, linewidth=0, alpha=0.85)
-    brazil.boundary.plot(ax=ax, color="black", linewidth=0.6)
-    ax.set_xlim(-74, -34)
-    ax.set_ylim(-34, 6)
-    ax.set_aspect("equal")
-    ax.axis("off")
-    ax.set_title(f"{title_line1}\n{title_line2}", fontsize=10, fontweight="bold", pad=4)
-    return norm
+def _monthly_cmap_norm(series: pd.Series, base_cmap):
+    """
+    Colormap discreto: cada mês do range dos dados recebe uma cor sólida
+    e distinta, maximizando o contraste visual entre datas próximas.
+    """
+    lo = float(np.percentile(series.dropna(), 2))
+    hi = float(np.percentile(series.dropna(), 98))
+
+    # Seleciona os meses presentes no range (com 1 mês de margem p/ borda)
+    active = [i for i, d in enumerate(MES_DOYS)
+              if lo - 32 <= d <= hi + 32]
+    if not active:
+        active = list(range(12))
+
+    # Limites entre meses (BoundaryNorm exige n+1 boundaries para n cores)
+    all_bounds = MES_DOYS + [366]
+    boundaries = [all_bounds[active[0]]] + [all_bounds[i + 1] for i in active]
+
+    n = len(active)
+    # Amostras distribuídas de 0.1 a 0.9 para evitar extremos muito claros/escuros
+    samples = np.linspace(0.15, 0.92, n)
+    colors = [base_cmap(s) for s in samples]
+    cmap = mcolors.ListedColormap(colors, name="monthly")
+    norm = mcolors.BoundaryNorm(boundaries, n)
+
+    tick_positions = [(boundaries[i] + boundaries[i + 1]) / 2 for i in range(n)]
+    tick_labels = [MESES[active[i]] for i in range(n)]
+    return cmap, norm, tick_positions, tick_labels
 
 
-def add_doy_colorbar(fig, ax_cb, norm, cmap):
-    cb = ColorbarBase(ax_cb, cmap=cmap, norm=norm, orientation="vertical")
-    cb.set_ticks(MES_DOYS)
-    cb.set_ticklabels(MESES)
-    cb.ax.tick_params(labelsize=8)
-    cb.set_label("Dia do ano (DOY)", fontsize=9)
+def plot_single_map(gdf: gpd.GeoDataFrame, doy_col: str, title: str,
+                    subtitle: str, brazil: gpd.GeoDataFrame,
+                    median_label: str, n_hex: int, r2: float,
+                    out_path: Path, base_cmap=None):
+    """Gera mapa com colormap discreto mensal — um bloco de cor sólida por mês."""
+    if base_cmap is None:
+        base_cmap = CMAP_PLANTIO
+    cmap, norm, tick_pos, tick_labels = _monthly_cmap_norm(gdf[doy_col], base_cmap)
+
+    fig = plt.figure(figsize=(9, 10))
+    fig.suptitle(f"{title}\n{subtitle}", fontsize=13, fontweight="bold", y=1.005)
+
+    gs = fig.add_gridspec(1, 2, width_ratios=[1, 0.055], wspace=0.03)
+    ax_map = fig.add_subplot(gs[0])
+    ax_cb  = fig.add_subplot(gs[1])
+
+    gdf.plot(column=doy_col, ax=ax_map, cmap=cmap, norm=norm,
+             linewidth=0, alpha=0.9)
+    brazil.boundary.plot(ax=ax_map, color="black", linewidth=0.7)
+    ax_map.set_xlim(-74, -34)
+    ax_map.set_ylim(-34, 6)
+    ax_map.set_aspect("equal")
+    ax_map.axis("off")
+
+    cb = ColorbarBase(ax_cb, cmap=cmap, norm=norm, orientation="vertical",
+                      spacing="proportional")
+    cb.set_ticks(tick_pos)
+    cb.set_ticklabels(tick_labels)
+    cb.ax.tick_params(labelsize=10)
+    cb.set_label("Mês", fontsize=10)
+
+    fig.text(
+        0.5, -0.01,
+        f"Mediana ≈ {median_label}  |  R² médio: {r2:.2f}  |  {n_hex:,} hexágonos",
+        ha="center", fontsize=9, color="#444444",
+    )
+
+    fig.savefig(out_path, dpi=150, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    print(f"    Salvo: {out_path}")
 
 
 def plot_cultura_tipo(df: pd.DataFrame, cultura: str, tipo: str,
                       brazil: gpd.GeoDataFrame):
-    """Gera figura com SOS e EOS para uma cultura e tipo (safra/safrinha)."""
+    """Gera mapa separado de plantio (SOS) e colheita (EOS)."""
     sub = df[(df["cultura"] == cultura) & (df["tipo_safra"] == tipo)].copy()
     if len(sub) < 10:
         print(f"  Poucos dados para {cultura}/{tipo} ({len(sub)}), pulando.")
@@ -125,38 +174,30 @@ def plot_cultura_tipo(df: pd.DataFrame, cultura: str, tipo: str,
     print(f"  Mapa: {cultura}/{tipo} ({len(sub)} hexágonos)", flush=True)
 
     gdf = build_geodataframe(sub)
-    cmap = make_doy_colormap()
+    r2 = sub["r2_medio"].mean()
+    n_hex = len(gdf)
 
-    fig = plt.figure(figsize=(16, 7))
-    fig.suptitle(
-        f"Fenologia — {cultura_label} | {tipo_label} (Brasil 2020–2024)",
-        fontsize=13, fontweight="bold", y=1.01,
+    plot_single_map(
+        gdf, "sos_doy",
+        title=f"{cultura_label} — Plantio (SOS)",
+        subtitle=f"{tipo_label} | Brasil 2020–2024",
+        brazil=brazil,
+        median_label=doy_to_date_str(sub["sos_doy"].median()),
+        n_hex=n_hex, r2=r2,
+        out_path=OUTPUT_DIR / f"fenologia_{cultura}_{tipo}_plantio.png",
+        base_cmap=CMAP_PLANTIO,
     )
 
-    gs = fig.add_gridspec(1, 3, width_ratios=[1, 1, 0.06], wspace=0.02)
-    ax_sos = fig.add_subplot(gs[0])
-    ax_eos = fig.add_subplot(gs[1])
-    ax_cb = fig.add_subplot(gs[2])
-
-    norm = plot_phenology_map(gdf, "sos_doy", cultura_label, "Plantio (SOS)",
-                              brazil, ax_sos, cmap)
-    plot_phenology_map(gdf, "eos_doy", cultura_label, "Colheita (EOS)",
-                       brazil, ax_eos, cmap)
-    add_doy_colorbar(fig, ax_cb, norm, cmap)
-
-    sos_label = doy_to_date_str(sub["sos_doy"].median())
-    eos_label = doy_to_date_str(sub["eos_doy"].median())
-    fig.text(
-        0.5, -0.02,
-        f"Mediana: Plantio ≈ {sos_label}  |  Colheita ≈ {eos_label}  |  "
-        f"R² médio: {sub['r2_medio'].mean():.2f}  |  Hexágonos: {len(gdf):,}",
-        ha="center", fontsize=9, color="#444444",
+    plot_single_map(
+        gdf, "eos_doy",
+        title=f"{cultura_label} — Colheita (EOS)",
+        subtitle=f"{tipo_label} | Brasil 2020–2024",
+        brazil=brazil,
+        median_label=doy_to_date_str(sub["eos_doy"].median()),
+        n_hex=n_hex, r2=r2,
+        out_path=OUTPUT_DIR / f"fenologia_{cultura}_{tipo}_colheita.png",
+        base_cmap=CMAP_COLHEITA,
     )
-
-    out_path = OUTPUT_DIR / f"fenologia_{cultura}_{tipo}.png"
-    fig.savefig(out_path, dpi=150, bbox_inches="tight", facecolor="white")
-    plt.close(fig)
-    print(f"    Salvo: {out_path}")
 
 
 def plot_overview(df: pd.DataFrame, brazil: gpd.GeoDataFrame,
@@ -169,7 +210,7 @@ def plot_overview(df: pd.DataFrame, brazil: gpd.GeoDataFrame,
         return
 
     tipo_label = TIPO_LABELS.get(tipo, tipo)
-    cmap = make_doy_colormap()
+    cmap = CMAP_PLANTIO
     n = len(culturas_com_dados)
     ncols = 3
     nrows = int(np.ceil(n / ncols))
@@ -187,15 +228,24 @@ def plot_overview(df: pd.DataFrame, brazil: gpd.GeoDataFrame,
         ax = axes[i]
         sub = sub_tipo[sub_tipo["cultura"] == cultura].copy()
         gdf = build_geodataframe(sub)
-        plot_phenology_map(gdf, "sos_doy",
-                           CULTURA_LABELS.get(cultura, cultura), "Plantio (SOS)",
-                           brazil, ax, cmap)
+        gdf.plot(column="sos_doy", ax=ax, cmap=cmap, norm=norm, linewidth=0, alpha=0.85)
+        brazil.boundary.plot(ax=ax, color="black", linewidth=0.6)
+        ax.set_xlim(-74, -34)
+        ax.set_ylim(-34, 6)
+        ax.set_aspect("equal")
+        ax.axis("off")
+        ax.set_title(f"{CULTURA_LABELS.get(cultura, cultura)}\nPlantio (SOS)",
+                     fontsize=10, fontweight="bold", pad=4)
 
     for j in range(len(culturas_com_dados), len(axes)):
         axes[j].axis("off")
 
     cb_ax = fig.add_axes([0.92, 0.15, 0.015, 0.7])
-    add_doy_colorbar(fig, cb_ax, norm, cmap)
+    cb = ColorbarBase(cb_ax, cmap=cmap, norm=norm, orientation="vertical")
+    cb.set_ticks(MES_DOYS)
+    cb.set_ticklabels(MESES)
+    cb_ax.tick_params(labelsize=8)
+    cb.set_label("Dia do ano (DOY)", fontsize=9)
 
     out_path = OUTPUT_DIR / f"fenologia_painel_plantio_{tipo}.png"
     fig.savefig(out_path, dpi=150, bbox_inches="tight", facecolor="white")
