@@ -40,21 +40,22 @@ CULTURAS = [
 ]
 
 MIN_CYCLE_DAYS = {
-    "soja": 70,
-    "cana": 120,
-    "arroz": 60,
-    "algodao": 70,
-    "cafe": 90,
-    "citrus": 90,
-    "dende": 90,
-    "outras_lavouras_temporarias": 60,
-    "outras_lavouras_perenes": 90,
-    "segunda_safra": 45,
-    "segunda_safra_algodao": 45,
-    "segunda_safra_outras_temporarias": 45,
+    "soja": 120,                          # soja: ~120-140 dias de ciclo
+    "cana": 150,                          # cana: ciclo longo ≥ 5 meses
+    "arroz": 100,                         # arroz: ~90-120 dias
+    "algodao": 110,                       # algodão: ~130-180 dias
+    "cafe": 120,                          # café: perene, ciclo anual
+    "citrus": 120,                        # citrus: perene
+    "dende": 120,                         # dendê: perene
+    "outras_lavouras_temporarias": 100,   # temporárias: mínimo realista
+    "outras_lavouras_perenes": 120,       # perenes: ciclo longo
+    "segunda_safra": 90,                  # milho safrinha: ~100-110 dias
+    "segunda_safra_algodao": 100,         # algodão safrinha
+    "segunda_safra_outras_temporarias": 90,
 }
 
 MIN_EVI_AMPLITUDE = 0.08
+MIN_R2_PER_CYCLE = 0.70  # descarta ciclos com ajuste gaussiano ruim
 
 PARTS_DIR = Path("data/output/_parts")
 OUTPUT = Path("data/output/fenologia_brasil.parquet")
@@ -102,6 +103,7 @@ def _worker(args):
         if c.get("fit_success")
         and c["cycle_length_days"] >= min_days
         and c["gaussian_params"]["amplitude"] >= MIN_EVI_AMPLITUDE
+        and c["r_squared"] >= MIN_R2_PER_CYCLE
     ]
 
     if not successful:
