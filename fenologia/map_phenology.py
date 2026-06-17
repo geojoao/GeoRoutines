@@ -85,8 +85,8 @@ def get_brazil_outline() -> gpd.GeoDataFrame:
     return world[world["name"] == "Brazil"]
 
 
-def make_doy_colormap():
-    return plt.cm.twilight_shifted
+CMAP_PLANTIO = plt.cm.YlOrRd   # amarelo → laranja → vermelho (início do ciclo)
+CMAP_COLHEITA = plt.cm.GnBu    # verde → azul (fim do ciclo)
 
 
 def _doy_range_for_col(series: pd.Series) -> tuple[float, float]:
@@ -105,9 +105,10 @@ def _snap_ticks(vmin: float, vmax: float) -> list[int]:
 def plot_single_map(gdf: gpd.GeoDataFrame, doy_col: str, title: str,
                     subtitle: str, brazil: gpd.GeoDataFrame,
                     median_label: str, n_hex: int, r2: float,
-                    out_path: Path):
+                    out_path: Path, cmap=None):
     """Gera um mapa único (plantio OU colheita) com escala ajustada aos dados."""
-    cmap = make_doy_colormap()
+    if cmap is None:
+        cmap = CMAP_PLANTIO
     vmin, vmax = _doy_range_for_col(gdf[doy_col])
     norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
     ticks = _snap_ticks(vmin, vmax)
@@ -169,6 +170,7 @@ def plot_cultura_tipo(df: pd.DataFrame, cultura: str, tipo: str,
         median_label=doy_to_date_str(sub["sos_doy"].median()),
         n_hex=n_hex, r2=r2,
         out_path=OUTPUT_DIR / f"fenologia_{cultura}_{tipo}_plantio.png",
+        cmap=CMAP_PLANTIO,
     )
 
     plot_single_map(
@@ -179,6 +181,7 @@ def plot_cultura_tipo(df: pd.DataFrame, cultura: str, tipo: str,
         median_label=doy_to_date_str(sub["eos_doy"].median()),
         n_hex=n_hex, r2=r2,
         out_path=OUTPUT_DIR / f"fenologia_{cultura}_{tipo}_colheita.png",
+        cmap=CMAP_COLHEITA,
     )
 
 
