@@ -195,7 +195,7 @@ def plot_overview(df: pd.DataFrame, brazil: gpd.GeoDataFrame,
         return
 
     tipo_label = TIPO_LABELS.get(tipo, tipo)
-    cmap = make_doy_colormap()
+    cmap = CMAP_PLANTIO
     n = len(culturas_com_dados)
     ncols = 3
     nrows = int(np.ceil(n / ncols))
