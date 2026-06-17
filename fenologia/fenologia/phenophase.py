@@ -323,6 +323,26 @@ def gaussian(x: np.ndarray, amplitude: float, mean: float, std: float, offset: f
     return amplitude * np.exp(-((x - mean) ** 2) / (2 * std ** 2)) + offset
 
 
+def classify_season_type(pos_date: pd.Timestamp) -> str:
+    """
+    Classifica um ciclo como 'safra' ou 'safrinha' pelo DOY do pico vegetativo (POS).
+
+    Safra (principal): POS próximo do início das chuvas no Brasil (out–mar),
+        DOY ≤ 90 (jan–mar) ou DOY ≥ 274 (out–dez).
+    Safrinha (segunda safra): POS no meio do ano seco (abr–set), DOY 91–273.
+
+    Args:
+        pos_date: Data do pico vegetativo (POS).
+
+    Returns:
+        'safra' ou 'safrinha'
+    """
+    doy = pos_date.day_of_year
+    if doy <= 90 or doy >= 274:
+        return 'safra'
+    return 'safrinha'
+
+
 def fit_gaussian_to_cycle(ndvi_values: np.ndarray, dates: np.ndarray, cycle: Dict[str, Any],
                          quality_threshold: float = 0.6) -> Dict[str, Any]:
     """
@@ -422,6 +442,7 @@ def fit_gaussian_to_cycle(ndvi_values: np.ndarray, dates: np.ndarray, cycle: Dic
             'cycle_start': cycle['start_date'],
             'cycle_end': cycle['end_date'],
             'cycle_length_days': cycle['length_days'],
+            'season_type': classify_season_type(pos_date),
             'r_squared': float(r_squared),
             'rmse': float(np.sqrt(np.mean(residuals ** 2))),
             'gaussian_params': {
