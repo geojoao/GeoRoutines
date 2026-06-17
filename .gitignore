@@ -5,3 +5,6 @@
 *.geotif
 *.geotiff
 fenologia/data/output/evi_brazil.parquet
+__pycache__/
+*.pyc
+*.pyo

@@ -1,8 +1,14 @@
 """
 Extrai métricas fenológicas (SOS/plantio, EOS/colheita) por hexágono e cultura
-a partir do evi_brazil.parquet, usando o módulo phenophase.py.
+a partir dos arquivos _parts/, usando o módulo phenophase.py.
+
+Cada ciclo detectado é classificado como 'safra' ou 'safrinha' pela data do POS:
+  - Safra:    POS em out–mar (DOY ≤ 90 ou ≥ 274) — início das chuvas
+  - Safrinha: POS em abr–set (DOY 91–273)         — meio do ano seco
 
 Saída: data/output/fenologia_brasil.parquet
+  Colunas: id_hexagono, cultura, tipo_safra, n_ciclos, sos_doy, pos_doy, eos_doy,
+            r2_medio, duracao_media_dias, evi_maximo
 """
 
 import sys
@@ -11,7 +17,7 @@ import pandas as pd
 import warnings
 import multiprocessing as mp
 from pathlib import Path
-from functools import partial
+from collections import defaultdict
 
 warnings.filterwarnings("ignore")
 
@@ -34,25 +40,26 @@ CULTURAS = [
 ]
 
 MIN_CYCLE_DAYS = {
-    "soja": 70,
-    "cana": 120,
-    "arroz": 60,
-    "algodao": 70,
-    "cafe": 90,
-    "citrus": 90,
-    "dende": 90,
-    "outras_lavouras_temporarias": 60,
-    "outras_lavouras_perenes": 90,
-    "segunda_safra": 45,
-    "segunda_safra_algodao": 45,
-    "segunda_safra_outras_temporarias": 45,
+    "soja": 120,                          # soja: ~120-140 dias de ciclo
+    "cana": 150,                          # cana: ciclo longo ≥ 5 meses
+    "arroz": 100,                         # arroz: ~90-120 dias
+    "algodao": 110,                       # algodão: ~130-180 dias
+    "cafe": 120,                          # café: perene, ciclo anual
+    "citrus": 120,                        # citrus: perene
+    "dende": 120,                         # dendê: perene
+    "outras_lavouras_temporarias": 100,   # temporárias: mínimo realista
+    "outras_lavouras_perenes": 120,       # perenes: ciclo longo
+    "segunda_safra": 90,                  # milho safrinha: ~100-110 dias
+    "segunda_safra_algodao": 100,         # algodão safrinha
+    "segunda_safra_outras_temporarias": 90,
 }
 
 MIN_EVI_AMPLITUDE = 0.08
+MIN_R2_PER_CYCLE = 0.70  # descarta ciclos com ajuste gaussiano ruim
 
-INPUT = Path("data/output/evi_brazil.parquet")
+PARTS_DIR = Path("data/output/_parts")
 OUTPUT = Path("data/output/fenologia_brasil.parquet")
-N_WORKERS = 14  # deixa 2 livres no sistema
+N_WORKERS = 14
 
 
 def circular_mean_doy(doys):
@@ -69,9 +76,10 @@ def _worker(args):
     warnings.filterwarnings("ignore")
     hex_id, dates, evi, cultura = args
 
+    evi = evi.astype(float)
     mask = ~np.isnan(evi)
     if mask.sum() < 10:
-        return None
+        return []
 
     sub = pd.DataFrame({"datetime": dates[mask], "NDVI_mean": evi[mask]})
     min_days = MIN_CYCLE_DAYS.get(cultura, 60)
@@ -85,47 +93,75 @@ def _worker(args):
             quality_threshold=0.5,
         )
     except Exception:
-        return None
+        return []
 
     if not result["success"]:
-        return None
+        return []
 
     successful = [
         c for c in result["cycles"]
         if c.get("fit_success")
         and c["cycle_length_days"] >= min_days
         and c["gaussian_params"]["amplitude"] >= MIN_EVI_AMPLITUDE
+        and c["r_squared"] >= MIN_R2_PER_CYCLE
     ]
 
     if not successful:
-        return None
+        return []
 
-    sos_doys = [c["phenophase_dates"]["sos"].day_of_year for c in successful]
-    pos_doys = [c["phenophase_dates"]["pos"].day_of_year for c in successful]
-    eos_doys = [c["phenophase_dates"]["eos"].day_of_year for c in successful]
-    r2s = [c["r_squared"] for c in successful]
-    lengths = [c["cycle_length_days"] for c in successful]
+    evi_max = float(sub["NDVI_mean"].max())
 
-    return {
-        "id_hexagono": hex_id,
-        "cultura": cultura,
-        "n_ciclos": len(successful),
-        "sos_doy": circular_mean_doy(sos_doys),
-        "pos_doy": circular_mean_doy(pos_doys),
-        "eos_doy": circular_mean_doy(eos_doys),
-        "r2_medio": float(np.mean(r2s)),
-        "duracao_media_dias": float(np.mean(lengths)),
-        "evi_maximo": float(sub["NDVI_mean"].max()),
-    }
+    # Agrupa ciclos por tipo_safra (safra / safrinha)
+    by_season = defaultdict(list)
+    for c in successful:
+        season = c.get("season_type", "safra")
+        by_season[season].append(c)
+
+    records = []
+    for season, cycles in by_season.items():
+        sos_doys = [c["phenophase_dates"]["sos"].day_of_year for c in cycles]
+        pos_doys = [c["phenophase_dates"]["pos"].day_of_year for c in cycles]
+        eos_doys = [c["phenophase_dates"]["eos"].day_of_year for c in cycles]
+        r2s = [c["r_squared"] for c in cycles]
+        lengths = [c["cycle_length_days"] for c in cycles]
+
+        records.append({
+            "id_hexagono": hex_id,
+            "cultura": cultura,
+            "tipo_safra": season,
+            "n_ciclos": len(cycles),
+            "sos_doy": circular_mean_doy(sos_doys),
+            "pos_doy": circular_mean_doy(pos_doys),
+            "eos_doy": circular_mean_doy(eos_doys),
+            "r2_medio": float(np.mean(r2s)),
+            "duracao_media_dias": float(np.mean(lengths)),
+            "evi_maximo": evi_max,
+        })
+
+    return records
+
+
+def load_evi_from_parts() -> pd.DataFrame:
+    """Concatena todos os arquivos _parts/ para reconstruir a série temporal."""
+    parts = sorted(PARTS_DIR.glob("*.parquet"))
+    print(f"  Carregando {len(parts)} arquivos _parts/...", flush=True)
+    dfs = [pd.read_parquet(p) for p in parts]
+    df = pd.concat(dfs, ignore_index=True)
+    # Remove duplicatas (hexagono+data) que podem existir se tiles se sobrepõem
+    df = df.drop_duplicates(subset=["id_hexagono", "data"])
+    print(f"  {len(df):,} linhas, {df['id_hexagono'].nunique():,} hexágonos únicos", flush=True)
+    return df
 
 
 def process_cultura(df: pd.DataFrame, cultura: str) -> list[dict]:
     col = f"evi_medio_{cultura}"
+    if col not in df.columns:
+        print(f"  [{cultura}] coluna {col} não encontrada, pulando.")
+        return []
     sub = df[["id_hexagono", "data", col]].dropna(subset=[col])
     hex_ids = sub["id_hexagono"].unique()
     print(f"  [{cultura}] {len(hex_ids):,} hexágonos...", flush=True)
 
-    # Monta lista de argumentos (arrays numpy são mais baratos para serialização)
     grouped = sub.groupby("id_hexagono")
     tasks = []
     for hex_id, grp in grouped:
@@ -140,15 +176,15 @@ def process_cultura(df: pd.DataFrame, cultura: str) -> list[dict]:
     with mp.Pool(processes=N_WORKERS) as pool:
         results = pool.map(_worker, tasks, chunksize=20)
 
-    valid = [r for r in results if r is not None]
-    print(f"  [{cultura}] -> {len(valid):,} ajustes válidos", flush=True)
+    # Cada resultado é uma lista (pode ser vazia)
+    valid = [r for result in results for r in result]
+    print(f"  [{cultura}] -> {len(valid):,} registros (safra+safrinha)", flush=True)
     return valid
 
 
 def main():
-    print("Carregando evi_brazil.parquet...")
-    df = pd.read_parquet(INPUT)
-    print(f"  {len(df):,} linhas, {df['id_hexagono'].nunique():,} hexágonos")
+    print("Carregando séries temporais EVI dos _parts/...")
+    df = load_evi_from_parts()
 
     all_records = []
     for cultura in CULTURAS:
@@ -159,7 +195,10 @@ def main():
     out = pd.DataFrame(all_records)
     out.to_parquet(OUTPUT, index=False)
     print(f"Salvo em {OUTPUT}")
-    print(out.groupby("cultura")[["n_ciclos", "r2_medio", "duracao_media_dias"]].mean().round(2))
+    summary = out.groupby(["cultura", "tipo_safra"])[
+        ["n_ciclos", "r2_medio", "duracao_media_dias"]
+    ].mean().round(2)
+    print(summary)
 
 
 if __name__ == "__main__":

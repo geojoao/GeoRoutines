@@ -23,6 +23,7 @@ import shutil
 import time
 import warnings
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Sequence
 
@@ -321,14 +322,32 @@ def build_tile_cube(
     for g in grans:
         by_date[granule_date(g)].append(g)
 
+    # Pre-download all granules in parallel (IO-bound → threads safe here)
+    all_grans = [g for gs in by_date.values() for g in gs]
+
+    def _dl(g):
+        try:
+            path = _fetch_granule_to_temp(g, tmp_dir, f"{label}")
+            return granule_ur(g), path
+        except Exception as exc:
+            tqdm.write(f"    [erro download] {granule_ur(g)}: {exc!r}")
+            return granule_ur(g), None
+
+    n_workers = min(8, max(1, len(all_grans)))
+    prefetched: dict[str, Path | None] = {}
+    with ThreadPoolExecutor(max_workers=n_workers) as exe:
+        for ur, path in exe.map(_dl, all_grans):
+            prefetched[ur] = path
+
     arrays = []
     dates = []
     for date in sorted(by_date):
         tile_arrays = []
         for g in by_date[date]:
-            h5_path = None
+            h5_path = prefetched.get(granule_ur(g))
+            if h5_path is None:
+                continue
             try:
-                h5_path = _fetch_granule_to_temp(g, tmp_dir, f"{label} {date}")
                 da = read_evi_tile(h5_path)
                 da_ll = da.rio.reproject_match(template, resampling=Resampling.nearest)
                 tile_arrays.append(da_ll)
