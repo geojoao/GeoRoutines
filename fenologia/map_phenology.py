@@ -89,34 +89,49 @@ CMAP_PLANTIO = plt.cm.YlOrRd   # amarelo → laranja → vermelho (início do ci
 CMAP_COLHEITA = plt.cm.GnBu    # verde → azul (fim do ciclo)
 
 
-def _doy_range_for_col(series: pd.Series) -> tuple[float, float]:
-    """Range ajustado ao p2–p98 dos dados para máximo contraste de cores."""
+def _monthly_cmap_norm(series: pd.Series, base_cmap):
+    """
+    Colormap discreto: cada mês do range dos dados recebe uma cor sólida
+    e distinta, maximizando o contraste visual entre datas próximas.
+    """
     lo = float(np.percentile(series.dropna(), 2))
     hi = float(np.percentile(series.dropna(), 98))
-    margin = max((hi - lo) * 0.05, 4)
-    return max(1, lo - margin), min(365, hi + margin)
 
+    # Seleciona os meses presentes no range (com 1 mês de margem p/ borda)
+    active = [i for i, d in enumerate(MES_DOYS)
+              if lo - 32 <= d <= hi + 32]
+    if not active:
+        active = list(range(12))
 
-def _snap_ticks(vmin: float, vmax: float) -> list[int]:
-    """Retorna só os MES_DOYS que caem dentro do range visível."""
-    return [d for d in MES_DOYS if vmin <= d <= vmax]
+    # Limites entre meses (BoundaryNorm exige n+1 boundaries para n cores)
+    all_bounds = MES_DOYS + [366]
+    boundaries = [all_bounds[active[0]]] + [all_bounds[i + 1] for i in active]
+
+    n = len(active)
+    # Amostras distribuídas de 0.1 a 0.9 para evitar extremos muito claros/escuros
+    samples = np.linspace(0.15, 0.92, n)
+    colors = [base_cmap(s) for s in samples]
+    cmap = mcolors.ListedColormap(colors, name="monthly")
+    norm = mcolors.BoundaryNorm(boundaries, n)
+
+    tick_positions = [(boundaries[i] + boundaries[i + 1]) / 2 for i in range(n)]
+    tick_labels = [MESES[active[i]] for i in range(n)]
+    return cmap, norm, tick_positions, tick_labels
 
 
 def plot_single_map(gdf: gpd.GeoDataFrame, doy_col: str, title: str,
                     subtitle: str, brazil: gpd.GeoDataFrame,
                     median_label: str, n_hex: int, r2: float,
-                    out_path: Path, cmap=None):
-    """Gera um mapa único (plantio OU colheita) com escala ajustada aos dados."""
-    if cmap is None:
-        cmap = CMAP_PLANTIO
-    vmin, vmax = _doy_range_for_col(gdf[doy_col])
-    norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
-    ticks = _snap_ticks(vmin, vmax)
+                    out_path: Path, base_cmap=None):
+    """Gera mapa com colormap discreto mensal — um bloco de cor sólida por mês."""
+    if base_cmap is None:
+        base_cmap = CMAP_PLANTIO
+    cmap, norm, tick_pos, tick_labels = _monthly_cmap_norm(gdf[doy_col], base_cmap)
 
     fig = plt.figure(figsize=(9, 10))
     fig.suptitle(f"{title}\n{subtitle}", fontsize=13, fontweight="bold", y=1.005)
 
-    gs = fig.add_gridspec(1, 2, width_ratios=[1, 0.045], wspace=0.03)
+    gs = fig.add_gridspec(1, 2, width_ratios=[1, 0.055], wspace=0.03)
     ax_map = fig.add_subplot(gs[0])
     ax_cb  = fig.add_subplot(gs[1])
 
@@ -128,12 +143,12 @@ def plot_single_map(gdf: gpd.GeoDataFrame, doy_col: str, title: str,
     ax_map.set_aspect("equal")
     ax_map.axis("off")
 
-    cb = ColorbarBase(ax_cb, cmap=cmap, norm=norm, orientation="vertical")
-    if ticks:
-        cb.set_ticks(ticks)
-        cb.set_ticklabels([MESES[MES_DOYS.index(t)] for t in ticks])
-    cb.ax.tick_params(labelsize=9)
-    cb.set_label("Dia do ano (DOY)", fontsize=9)
+    cb = ColorbarBase(ax_cb, cmap=cmap, norm=norm, orientation="vertical",
+                      spacing="proportional")
+    cb.set_ticks(tick_pos)
+    cb.set_ticklabels(tick_labels)
+    cb.ax.tick_params(labelsize=10)
+    cb.set_label("Mês", fontsize=10)
 
     fig.text(
         0.5, -0.01,
@@ -170,7 +185,7 @@ def plot_cultura_tipo(df: pd.DataFrame, cultura: str, tipo: str,
         median_label=doy_to_date_str(sub["sos_doy"].median()),
         n_hex=n_hex, r2=r2,
         out_path=OUTPUT_DIR / f"fenologia_{cultura}_{tipo}_plantio.png",
-        cmap=CMAP_PLANTIO,
+        base_cmap=CMAP_PLANTIO,
     )
 
     plot_single_map(
@@ -181,7 +196,7 @@ def plot_cultura_tipo(df: pd.DataFrame, cultura: str, tipo: str,
         median_label=doy_to_date_str(sub["eos_doy"].median()),
         n_hex=n_hex, r2=r2,
         out_path=OUTPUT_DIR / f"fenologia_{cultura}_{tipo}_colheita.png",
-        cmap=CMAP_COLHEITA,
+        base_cmap=CMAP_COLHEITA,
     )
 
 
