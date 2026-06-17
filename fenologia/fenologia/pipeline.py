@@ -15,6 +15,8 @@ hexágonos vizinhos):
 """
 from __future__ import annotations
 
+import ctypes
+import gc
 import tempfile
 import time
 from collections import defaultdict
@@ -26,6 +28,18 @@ import pandas as pd
 import rioxarray  # noqa: F401
 from shapely.geometry import mapping
 from tqdm import tqdm
+
+try:
+    _libc = ctypes.CDLL("libc.so.6")
+except OSError:
+    _libc = None
+
+
+def _release_memory():
+    """Force Python and glibc to return freed pages to the OS."""
+    gc.collect()
+    if _libc is not None:
+        _libc.malloc_trim(0)
 
 from . import config, extract, mapbiomas, tiles, viirs
 from .grid import cell_to_polygon
@@ -102,8 +116,10 @@ def process_tile_bucket(
             if len(df_sec):
                 frames_by_hex[hex_id].append(df_sec)
 
-        # `cube`, `cov`, `sec` saem de escopo aqui (próximo ano descarta e
-        # reconstrói) — nada fica retido em memória entre baldes/anos.
+        # Libera explicitamente o cubo e os MapBiomas antes do próximo ano,
+        # e força glibc a devolver páginas ao SO (evita crescimento de RSS).
+        del cube, cov, sec
+        _release_memory()
 
     result: dict[str, pd.DataFrame] = {}
     for hex_id in hex_ids:
