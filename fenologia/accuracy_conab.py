@@ -49,70 +49,40 @@ def doy_diff_circular(a: float, b: float) -> float:
     return d
 
 
-def load_state_boundaries() -> gpd.GeoDataFrame:
-    """Carrega estados do Brasil via pyogrio/naturalearth ou IBGE."""
-    try:
-        import pyogrio
-        import geopandas as gpd
-        pyogrio_dir = Path(pyogrio.__file__).parent
-        ne_path = pyogrio_dir / "tests" / "fixtures" / "naturalearth_lowres" / "naturalearth_lowres.shp"
-        world = gpd.read_file(ne_path)
-        brazil = world[world["iso_a3"] == "BRA"]
-        # naturalearth_lowres só tem o país inteiro, não estados
-        # tentamos a versão de estados
-    except Exception:
-        pass
-
-    # Tenta arquivo local de estados
-    for candidate in [
-        Path("data/estados_brasil.gpkg"),
-        Path("data/estados_brasil.shp"),
-        Path("data/br_states.gpkg"),
-    ]:
-        if candidate.exists():
-            return gpd.read_file(candidate)
-
-    # Baixa do IBGE via URL (fallback)
-    url = (
-        "https://geoftp.ibge.gov.br/organizacao_do_territorio/malhas_territoriais/"
-        "malhas_municipais/municipio_2022/Brasil/BR/"
-        "BR_UF_2022.zip"
-    )
-    try:
-        gdf = gpd.read_file(url)
-        return gdf[["NM_UF", "geometry"]].rename(columns={"NM_UF": "estado"})
-    except Exception as e:
-        raise RuntimeError(
-            f"Não foi possível carregar estados do Brasil: {e}\n"
-            "Salve um shapefile em data/estados_brasil.shp ou data/estados_brasil.gpkg"
-        ) from e
+# Centroides aproximados de cada estado com referência Conab (lon, lat)
+_STATE_CENTROIDS = {
+    "Tocantins":          (-48.3, -10.2),
+    "Maranhão":           (-45.3,  -5.4),
+    "Piauí":              (-43.0,  -7.0),
+    "Bahia":              (-41.7, -12.9),
+    "Mato Grosso":        (-55.9, -12.6),
+    "Mato Grosso do Sul": (-54.5, -20.5),
+    "Goiás":              (-49.3, -15.9),
+    "Minas Gerais":       (-45.4, -18.1),
+    "São Paulo":          (-48.7, -22.1),
+    "Paraná":             (-51.6, -24.6),
+    "Santa Catarina":     (-50.7, -27.4),
+    "Rio Grande do Sul":  (-53.1, -30.0),
+}
 
 
-def hex_centroids(hex_ids: pd.Series) -> gpd.GeoDataFrame:
+def assign_states(df_soja: pd.DataFrame, _states=None) -> pd.DataFrame:
+    """Atribui estado a cada hexágono pelo centroide mais próximo (nearest-centroid)."""
     import h3
-    from shapely.geometry import Point
-    pts = []
-    for hid in hex_ids:
+
+    estado_names = list(_STATE_CENTROIDS.keys())
+    c_lon = np.array([v[0] for v in _STATE_CENTROIDS.values()])
+    c_lat = np.array([v[1] for v in _STATE_CENTROIDS.values()])
+
+    estados_assigned = []
+    for hid in df_soja["id_hexagono"]:
         lat, lon = h3.cell_to_latlng(hid)
-        pts.append(Point(lon, lat))
-    return gpd.GeoDataFrame({"id_hexagono": hex_ids.values, "geometry": pts}, crs="EPSG:4326")
+        dists = (lon - c_lon) ** 2 + (lat - c_lat) ** 2
+        estados_assigned.append(estado_names[int(np.argmin(dists))])
 
-
-def assign_states(df_soja: pd.DataFrame, states: gpd.GeoDataFrame) -> pd.DataFrame:
-    """Faz spatial join hexagono → estado."""
-    # Padroniza coluna de nome do estado
-    col_nome = None
-    for c in ["estado", "NM_UF", "name", "NAME_1", "NOME"]:
-        if c in states.columns:
-            col_nome = c
-            break
-    if col_nome is None:
-        col_nome = states.columns[0]
-    states = states[[col_nome, "geometry"]].rename(columns={col_nome: "estado"})
-
-    centroids = hex_centroids(df_soja["id_hexagono"])
-    joined = gpd.sjoin(centroids, states, how="left", predicate="within")
-    return df_soja.merge(joined[["id_hexagono", "estado"]], on="id_hexagono", how="left")
+    result = df_soja.copy()
+    result["estado"] = estados_assigned
+    return result
 
 
 def evaluate(df: pd.DataFrame) -> pd.DataFrame:
@@ -123,9 +93,8 @@ def evaluate(df: pd.DataFrame) -> pd.DataFrame:
 
     print(f"  {len(soja_safra):,} hex com soja/safra")
 
-    print("Carregando estados...")
-    states = load_state_boundaries()
-    soja_safra = assign_states(soja_safra, states)
+    print("Atribuindo estados por nearest-centroid...")
+    soja_safra = assign_states(soja_safra)
     soja_safra = soja_safra.dropna(subset=["estado"])
 
     rows = []
