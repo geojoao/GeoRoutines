@@ -85,56 +85,41 @@ def get_brazil_outline() -> gpd.GeoDataFrame:
     return world[world["name"] == "Brazil"]
 
 
-# Colormap cíclico customizado: base twilight_shifted (azul→branco→vermelho→preto)
-# com amarelo e verde escuro inseridos para máximo contraste entre meses vizinhos.
-#   Jan=azul-escuro · Fev=azul · Mar=ciano · Abr=amarelo · Mai=branco ·
-#   Jun=salmão · Jul=vermelho · Ago=vermelho-escuro · Set=verde-escuro ·
-#   Out=preto · Nov=roxo · Dez=azul-escuro (fecha o ciclo)
-from matplotlib.colors import LinearSegmentedColormap as _LSC
-CMAP_FENOLOGIA = _LSC.from_list("fenologia_cyclic", [
-    (0.000, "#0d0221"),  # azul muito escuro / quase preto
-    (0.083, "#0a4f8a"),  # azul médio
-    (0.167, "#00b4d8"),  # ciano brilhante
-    (0.250, "#ffe234"),  # amarelo vivo          ← EXTRA (muito discrepante)
-    (0.333, "#ffffff"),  # branco
-    (0.417, "#ff9a8b"),  # salmão claro
-    (0.500, "#d00000"),  # vermelho puro
-    (0.583, "#6d0000"),  # vermelho escuro
-    (0.667, "#1b4332"),  # verde floresta        ← EXTRA (muito discrepante)
-    (0.750, "#081c15"),  # verde quase preto
-    (0.833, "#4a0e8f"),  # roxo escuro
-    (0.917, "#220055"),  # índigo
-    (1.000, "#0d0221"),  # fecha o ciclo
-])
+# Paleta qualitativa: 12 cores bem distintas entre si, uma por mês.
+# Escolhidas para máximo contraste perceptual (sem cores escuras adjacentes).
+_MES_CORES = [
+    "#e6194b",  # Jan — vermelho vivo
+    "#3cb44b",  # Fev — verde vivo
+    "#ffe119",  # Mar — amarelo
+    "#4363d8",  # Abr — azul royal
+    "#f58231",  # Mai — laranja
+    "#911eb4",  # Jun — roxo
+    "#42d4f4",  # Jul — ciano
+    "#f032e6",  # Ago — magenta
+    "#bfef45",  # Set — verde-limão
+    "#fabed4",  # Out — rosa claro
+    "#469990",  # Nov — teal
+    "#9A6324",  # Dez — marrom
+]
 
-
-def _monthly_cmap_norm(series: pd.Series, base_cmap):
-    """
-    Colormap discreto: cada mês do range dos dados recebe uma cor sólida
-    e distinta, maximizando o contraste visual entre datas próximas.
-    """
+def _monthly_cmap_norm(series: pd.Series, _unused=None):
+    """Colormap qualitativo: cada mês recebe uma cor fixa e distinta."""
     lo = float(np.percentile(series.dropna(), 2))
     hi = float(np.percentile(series.dropna(), 98))
 
-    # Seleciona os meses presentes no range (com 1 mês de margem p/ borda)
-    active = [i for i, d in enumerate(MES_DOYS)
-              if lo - 32 <= d <= hi + 32]
+    active = [i for i, d in enumerate(MES_DOYS) if lo - 32 <= d <= hi + 32]
     if not active:
         active = list(range(12))
 
-    # Limites entre meses (BoundaryNorm exige n+1 boundaries para n cores)
     all_bounds = MES_DOYS + [366]
     boundaries = [all_bounds[active[0]]] + [all_bounds[i + 1] for i in active]
 
-    n = len(active)
-    # Amostras distribuídas de 0.1 a 0.9 para evitar extremos muito claros/escuros
-    samples = np.linspace(0.15, 0.92, n)
-    colors = [base_cmap(s) for s in samples]
-    cmap = mcolors.ListedColormap(colors, name="monthly")
-    norm = mcolors.BoundaryNorm(boundaries, n)
+    colors = [_MES_CORES[i] for i in active]
+    cmap = mcolors.ListedColormap(colors, name="monthly_qual")
+    norm = mcolors.BoundaryNorm(boundaries, len(active))
 
-    tick_positions = [(boundaries[i] + boundaries[i + 1]) / 2 for i in range(n)]
-    tick_labels = [MESES[active[i]] for i in range(n)]
+    tick_positions = [(boundaries[i] + boundaries[i + 1]) / 2 for i in range(len(active))]
+    tick_labels = [MESES[active[i]] for i in range(len(active))]
     return cmap, norm, tick_positions, tick_labels
 
 
@@ -142,10 +127,8 @@ def plot_single_map(gdf: gpd.GeoDataFrame, doy_col: str, title: str,
                     subtitle: str, brazil: gpd.GeoDataFrame,
                     median_label: str, n_hex: int, r2: float,
                     out_path: Path, base_cmap=None):
-    """Gera mapa com colormap discreto mensal — um bloco de cor sólida por mês."""
-    if base_cmap is None:
-        base_cmap = CMAP_FENOLOGIA
-    cmap, norm, tick_pos, tick_labels = _monthly_cmap_norm(gdf[doy_col], base_cmap)
+    """Gera mapa com paleta qualitativa mensal — cor fixa e distinta por mês."""
+    cmap, norm, tick_pos, tick_labels = _monthly_cmap_norm(gdf[doy_col])
 
     fig = plt.figure(figsize=(9, 10))
     fig.suptitle(f"{title}\n{subtitle}", fontsize=13, fontweight="bold", y=1.005)
@@ -204,7 +187,7 @@ def plot_cultura_tipo(df: pd.DataFrame, cultura: str, tipo: str,
         median_label=doy_to_date_str(sub["sos_doy"].median()),
         n_hex=n_hex, r2=r2,
         out_path=OUTPUT_DIR / f"fenologia_{cultura}_{tipo}_plantio.png",
-        base_cmap=CMAP_FENOLOGIA,
+        base_cmap=None,
     )
 
     plot_single_map(
@@ -215,7 +198,7 @@ def plot_cultura_tipo(df: pd.DataFrame, cultura: str, tipo: str,
         median_label=doy_to_date_str(sub["eos_doy"].median()),
         n_hex=n_hex, r2=r2,
         out_path=OUTPUT_DIR / f"fenologia_{cultura}_{tipo}_colheita.png",
-        base_cmap=CMAP_FENOLOGIA,
+        base_cmap=None,
     )
 
 
@@ -229,7 +212,7 @@ def plot_overview(df: pd.DataFrame, brazil: gpd.GeoDataFrame,
         return
 
     tipo_label = TIPO_LABELS.get(tipo, tipo)
-    cmap = CMAP_FENOLOGIA
+    cmap = mcolors.ListedColormap(_MES_CORES)
     n = len(culturas_com_dados)
     ncols = 3
     nrows = int(np.ceil(n / ncols))
