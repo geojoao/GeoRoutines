@@ -122,6 +122,15 @@ select:focus { outline: none; border-color: #58a6ff; }
 }
 .pill-knn { background: rgba(255,165,0,.15); color: #FFA500; border: 1px solid #FFA500; }
 
+#ts-mode { display: flex; gap: 4px; align-items: center; }
+.mode-btn {
+  padding: 3px 9px; font-size: 10px; font-weight: 600;
+  background: #21262d; border: 1px solid #30363d; border-radius: 4px;
+  color: #8b949e; cursor: pointer; transition: all .15s; white-space: nowrap;
+}
+.mode-btn:hover { border-color: #58a6ff; color: #e6edf3; }
+.mode-btn.active { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+
 #btn-close {
   background: none; border: none; color: #8b949e;
   cursor: pointer; font-size: 18px; line-height: 1; padding: 0 4px;
@@ -226,6 +235,10 @@ select:focus { outline: none; border-color: #58a6ff; }
         <div id="ts-meta">Clique num hexágono para ver a série temporal</div>
         <div id="ts-pills"></div>
       </div>
+      <div id="ts-mode">
+        <button class="mode-btn active" data-mode="ciclos">Por ciclo</button>
+        <button class="mode-btn" data-mode="medio">Médio</button>
+      </div>
       <button id="btn-close">✕</button>
     </div>
     <div id="ts-body">
@@ -289,6 +302,9 @@ const LYR_LINE = "hex-line";
 
 let currentCampo = "sos_doy";
 let tsChart = null;
+let tsMode  = "ciclos";
+let tsData  = null;
+let tsKnn   = false;
 
 map.on("load", async () => {
   map.addSource(SRC, {
@@ -482,6 +498,15 @@ document.getElementById("btn-close").addEventListener("click", () => {
   document.getElementById("ts-panel").classList.remove("open");
 });
 
+document.querySelectorAll(".mode-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".mode-btn").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    tsMode = btn.dataset.mode;
+    if (tsData) { renderPills(); renderChart(); }
+  });
+});
+
 async function loadTimeSeries(hexId, cultura, props) {
   const panel     = document.getElementById("ts-panel");
   const tsLoading = document.getElementById("ts-loading");
@@ -498,13 +523,15 @@ async function loadTimeSeries(hexId, cultura, props) {
     );
     if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
     const data = await res.json();
+    tsData = data;
+    tsKnn  = !!props.knn;
 
     const n = data.cycles.length;
     document.getElementById("ts-meta").textContent =
       `${CULT_LABELS[cultura] || cultura} · ${n} ciclo${n !== 1 ? "s" : ""} detectado${n !== 1 ? "s" : ""}`;
 
-    renderPills(data.cycles, props.knn);
-    renderChart(data);
+    renderPills();
+    renderChart();
   } catch(err) {
     document.getElementById("ts-meta").textContent = "⚠ " + err.message;
   } finally {
@@ -512,23 +539,33 @@ async function loadTimeSeries(hexId, cultura, props) {
   }
 }
 
-function renderPills(cycles, isKnn) {
+function renderPills() {
   const el = document.getElementById("ts-pills");
   el.innerHTML = "";
-  cycles.forEach((c, i) => {
-    const col = CYCLE_PALETTE[i % CYCLE_PALETTE.length];
-    el.innerHTML +=
-      `<span class="pill" style="background:${col}22;color:${col};border:1px solid ${col}">` +
-      `C${c.cycle_num} · R²=${c.r_squared} · ${c.season_type}</span>`;
-  });
-  if (isKnn) el.innerHTML += `<span class="pill pill-knn">KNN</span>`;
+  if (tsMode === "ciclos") {
+    tsData.cycles.forEach((c, i) => {
+      const col = CYCLE_PALETTE[i % CYCLE_PALETTE.length];
+      el.innerHTML +=
+        `<span class="pill" style="background:${col}22;color:${col};border:1px solid ${col}">` +
+        `C${c.cycle_num} · R²=${c.r_squared} · ${c.season_type}</span>`;
+    });
+  } else {
+    (tsData.mean_phenophases || []).forEach(m => {
+      const sfx = m.tipo_safra === "safra" ? "Safra" : "Safrinha";
+      el.innerHTML +=
+        `<span class="pill" style="background:rgba(0,188,212,.15);color:#00BCD4;border:1px solid #00BCD4">SOS ${doyToMonthStr(m.sos_doy)} (${sfx})</span>` +
+        `<span class="pill" style="background:rgba(255,152,0,.15);color:#FF9800;border:1px solid #FF9800">POS ${doyToMonthStr(m.pos_doy)}</span>` +
+        `<span class="pill" style="background:rgba(233,30,99,.15);color:#E91E63;border:1px solid #E91E63">EOS ${doyToMonthStr(m.eos_doy)}</span>`;
+    });
+  }
+  if (tsKnn) el.innerHTML += `<span class="pill pill-knn">KNN</span>`;
 }
 
-function renderChart(data) {
+function renderChart() {
+  const data = tsData;
   if (tsChart) { tsChart.destroy(); tsChart = null; }
   const ctx = document.getElementById("ts-canvas").getContext("2d");
 
-  // Dataset 0 — EVI bruto
   const datasets = [
     {
       label: "EVI bruto",
@@ -542,7 +579,6 @@ function renderChart(data) {
       fill: false,
       order: 3,
     },
-    // Dataset 1 — EVI suavizado
     {
       label: "EVI suavizado",
       data: data.dates.map((d, i) => ({ x: d, y: data.smooth[i] })),
@@ -556,131 +592,116 @@ function renderChart(data) {
     },
   ];
 
-  // One Gaussian dataset + annotations per detected cycle
   const annotations = {};
 
-  data.cycles.forEach((c, i) => {
-    const col = CYCLE_PALETTE[i % CYCLE_PALETTE.length];
+  if (tsMode === "ciclos") {
+    // ── Modo ciclos: gaussiana + SOS/POS/EOS por pico vegetativo ──────────
+    data.cycles.forEach((c, i) => {
+      const col = CYCLE_PALETTE[i % CYCLE_PALETTE.length];
 
-    // Gaussian curve
-    datasets.push({
-      label: `Ciclo ${c.cycle_num}`,
-      data: c.gauss_dates.map((d, j) => ({ x: d, y: c.gauss_vals[j] })),
-      borderColor: col,
-      backgroundColor: "transparent",
-      borderWidth: 2,
-      borderDash: [5, 3],
-      pointRadius: 0,
-      tension: 0,
-      fill: false,
-      order: 1,
-    });
+      datasets.push({
+        label: `Ciclo ${c.cycle_num}`,
+        data: c.gauss_dates.map((d, j) => ({ x: d, y: c.gauss_vals[j] })),
+        borderColor: col,
+        backgroundColor: "transparent",
+        borderWidth: 2,
+        borderDash: [5, 3],
+        pointRadius: 0,
+        tension: 0,
+        fill: false,
+        order: 1,
+      });
 
-    // SOS — vertical dashed green line
-    annotations[`sos_${i}`] = {
-      type: "line",
-      xMin: c.sos.date, xMax: c.sos.date,
-      borderColor: "#4CAF50",
-      borderWidth: 1.5,
-      borderDash: [4, 3],
-      label: {
-        display: true, content: "SOS",
-        position: "start", yAdjust: -8,
-        color: "#4CAF50", font: { size: 9, weight: "bold" },
-        backgroundColor: "rgba(13,17,23,0.8)", padding: { x: 3, y: 1 },
-      },
-    };
-
-    // EOS — vertical dashed red line
-    annotations[`eos_${i}`] = {
-      type: "line",
-      xMin: c.eos.date, xMax: c.eos.date,
-      borderColor: "#F44336",
-      borderWidth: 1.5,
-      borderDash: [4, 3],
-      label: {
-        display: true, content: "EOS",
-        position: "end", yAdjust: 8,
-        color: "#F44336", font: { size: 9, weight: "bold" },
-        backgroundColor: "rgba(13,17,23,0.8)", padding: { x: 3, y: 1 },
-      },
-    };
-
-    // POS — filled circle at peak
-    annotations[`pos_${i}`] = {
-      type: "point",
-      xValue: c.pos.date,
-      yValue: c.pos.val,
-      backgroundColor: col,
-      borderColor: "#fff",
-      borderWidth: 1.5,
-      radius: 5,
-    };
-
-    // R² label above POS peak
-    annotations[`r2_${i}`] = {
-      type: "label",
-      xValue: c.pos.date,
-      yValue: c.pos.val,
-      yAdjust: -20,
-      content: `R²=${c.r_squared}  ${c.season_type}`,
-      color: col,
-      font: { size: 9, weight: "bold" },
-      backgroundColor: "rgba(13,17,23,0.85)",
-      padding: { x: 4, y: 2 },
-      borderRadius: 3,
-    };
-  });
-
-  // ── Médias fenológicas (repetidas por ano, cores distintas) ──────────────
-  const MEAN_COLORS = { sos: "#00BCD4", pos: "#FF9800", eos: "#E91E63" };
-  const YEARS_MEAN  = [2019, 2020, 2021, 2022, 2023, 2024];
-
-  (data.mean_phenophases || []).forEach((m, mi) => {
-    const isSafra = m.tipo_safra === "safra";
-    YEARS_MEAN.forEach((yr, yi) => {
-      const posYr = (isSafra && m.pos_doy < 180) ? yr + 1 : yr;
-      const eosYr = (isSafra && m.eos_doy < 180) ? yr + 1 : yr;
-      const sfx   = `${mi}_${yr}`;
-      const first  = (yi === 0);
-
-      annotations[`msos_${sfx}`] = {
+      annotations[`sos_${i}`] = {
         type: "line",
-        xMin: doyToDate(yr, m.sos_doy), xMax: doyToDate(yr, m.sos_doy),
-        borderColor: MEAN_COLORS.sos, borderWidth: 1, borderDash: [8, 4],
-        label: first ? {
-          display: true, content: "~SOS",
-          position: "start", yAdjust: 8,
-          color: MEAN_COLORS.sos, font: { size: 9 },
+        xMin: c.sos.date, xMax: c.sos.date,
+        borderColor: "#4CAF50", borderWidth: 1.5, borderDash: [4, 3],
+        label: {
+          display: true, content: "SOS",
+          position: "start", yAdjust: -8,
+          color: "#4CAF50", font: { size: 9, weight: "bold" },
           backgroundColor: "rgba(13,17,23,0.8)", padding: { x: 3, y: 1 },
-        } : { display: false },
+        },
       };
 
-      annotations[`mpos_${sfx}`] = {
+      annotations[`eos_${i}`] = {
         type: "line",
-        xMin: doyToDate(posYr, m.pos_doy), xMax: doyToDate(posYr, m.pos_doy),
-        borderColor: MEAN_COLORS.pos, borderWidth: 1, borderDash: [8, 4],
-        label: first ? {
-          display: true, content: "~POS",
-          position: "center",
-          color: MEAN_COLORS.pos, font: { size: 9 },
+        xMin: c.eos.date, xMax: c.eos.date,
+        borderColor: "#F44336", borderWidth: 1.5, borderDash: [4, 3],
+        label: {
+          display: true, content: "EOS",
+          position: "end", yAdjust: 8,
+          color: "#F44336", font: { size: 9, weight: "bold" },
           backgroundColor: "rgba(13,17,23,0.8)", padding: { x: 3, y: 1 },
-        } : { display: false },
+        },
       };
 
-      annotations[`meos_${sfx}`] = {
-        type: "line",
-        xMin: doyToDate(eosYr, m.eos_doy), xMax: doyToDate(eosYr, m.eos_doy),
-        borderColor: MEAN_COLORS.eos, borderWidth: 1, borderDash: [8, 4],
-        label: first ? {
-          display: true, content: "~EOS",
-          position: "end", yAdjust: -8,
-          color: MEAN_COLORS.eos, font: { size: 9 },
-          backgroundColor: "rgba(13,17,23,0.8)", padding: { x: 3, y: 1 },
-        } : { display: false },
+      annotations[`pos_${i}`] = {
+        type: "point",
+        xValue: c.pos.date, yValue: c.pos.val,
+        backgroundColor: col, borderColor: "#fff", borderWidth: 1.5, radius: 5,
+      };
+
+      annotations[`r2_${i}`] = {
+        type: "label",
+        xValue: c.pos.date, yValue: c.pos.val, yAdjust: -20,
+        content: `R²=${c.r_squared}  ${c.season_type}`,
+        color: col, font: { size: 9, weight: "bold" },
+        backgroundColor: "rgba(13,17,23,0.85)", padding: { x: 4, y: 2 }, borderRadius: 3,
       };
     });
-  });
+
+  } else {
+    // ── Modo médio: linhas repetidas a cada ano ────────────────────────────
+    const MC = { sos: "#00BCD4", pos: "#FF9800", eos: "#E91E63" };
+    const YEARS = [2019, 2020, 2021, 2022, 2023, 2024];
+
+    (data.mean_phenophases || []).forEach((m, mi) => {
+      const isSafra = m.tipo_safra === "safra";
+      YEARS.forEach((yr, yi) => {
+        const posYr = (isSafra && m.pos_doy < 180) ? yr + 1 : yr;
+        const eosYr = (isSafra && m.eos_doy < 180) ? yr + 1 : yr;
+        const sfx   = `${mi}_${yr}`;
+        const first = (yi === 0);
+
+        annotations[`msos_${sfx}`] = {
+          type: "line",
+          xMin: doyToDate(yr, m.sos_doy), xMax: doyToDate(yr, m.sos_doy),
+          borderColor: MC.sos, borderWidth: 1.5, borderDash: [8, 4],
+          label: first ? {
+            display: true, content: "SOS médio",
+            position: "start", yAdjust: -8,
+            color: MC.sos, font: { size: 9, weight: "bold" },
+            backgroundColor: "rgba(13,17,23,0.8)", padding: { x: 3, y: 1 },
+          } : { display: false },
+        };
+
+        annotations[`mpos_${sfx}`] = {
+          type: "line",
+          xMin: doyToDate(posYr, m.pos_doy), xMax: doyToDate(posYr, m.pos_doy),
+          borderColor: MC.pos, borderWidth: 1.5, borderDash: [8, 4],
+          label: first ? {
+            display: true, content: "POS médio",
+            position: "center",
+            color: MC.pos, font: { size: 9, weight: "bold" },
+            backgroundColor: "rgba(13,17,23,0.8)", padding: { x: 3, y: 1 },
+          } : { display: false },
+        };
+
+        annotations[`meos_${sfx}`] = {
+          type: "line",
+          xMin: doyToDate(eosYr, m.eos_doy), xMax: doyToDate(eosYr, m.eos_doy),
+          borderColor: MC.eos, borderWidth: 1.5, borderDash: [8, 4],
+          label: first ? {
+            display: true, content: "EOS médio",
+            position: "end", yAdjust: 8,
+            color: MC.eos, font: { size: 9, weight: "bold" },
+            backgroundColor: "rgba(13,17,23,0.8)", padding: { x: 3, y: 1 },
+          } : { display: false },
+        };
+      });
+    });
+  }
 
   tsChart = new Chart(ctx, {
     type: "line",
