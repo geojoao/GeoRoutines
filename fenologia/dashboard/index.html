@@ -106,7 +106,7 @@ select:focus { outline: none; border-color: #58a6ff; }
   background: #0d1117; border-top: 1px solid #30363d;
   display: flex; flex-direction: column;
 }
-#ts-panel.open { height: 250px; }
+#ts-panel.open { height: 280px; }
 
 #ts-header {
   display: flex; align-items: center; justify-content: space-between;
@@ -116,13 +116,10 @@ select:focus { outline: none; border-color: #58a6ff; }
 #ts-info { display: flex; flex-direction: column; gap: 2px; }
 #ts-hex  { font-family: monospace; font-size: 11px; color: #58a6ff; }
 #ts-meta { font-size: 11px; color: #8b949e; }
-#ts-pills { display: flex; gap: 6px; margin-top: 2px; }
+#ts-pills { display: flex; gap: 5px; margin-top: 3px; flex-wrap: wrap; }
 .pill {
   font-size: 10px; padding: 1px 7px; border-radius: 10px; font-weight: 600;
 }
-.pill-sos { background: rgba(76,175,80,.2);  color: #4CAF50; border: 1px solid #4CAF50; }
-.pill-pos { background: rgba(255,215,0,.15); color: #FFD700; border: 1px solid #FFD700; }
-.pill-eos { background: rgba(244,67,54,.2);  color: #F44336; border: 1px solid #F44336; }
 .pill-knn { background: rgba(255,165,0,.15); color: #FFA500; border: 1px solid #FFA500; }
 
 #btn-close {
@@ -294,13 +291,11 @@ let currentCampo = "sos_doy";
 let tsChart = null;
 
 map.on("load", async () => {
-  // Source vazio
   map.addSource(SRC, {
     type: "geojson",
     data: { type: "FeatureCollection", features: [] },
   });
 
-  // Camada dados reais (opaca)
   map.addLayer({
     id: LYR_REAL, type: "fill", source: SRC,
     filter: ["==", ["get", "knn"], false],
@@ -310,7 +305,6 @@ map.on("load", async () => {
     },
   });
 
-  // Camada KNN (semi-transparente)
   map.addLayer({
     id: LYR_KNN, type: "fill", source: SRC,
     filter: ["==", ["get", "knn"], true],
@@ -320,13 +314,11 @@ map.on("load", async () => {
     },
   });
 
-  // Bordas
   map.addLayer({
     id: LYR_LINE, type: "line", source: SRC,
     paint: { "line-color": "#000", "line-width": 0.3, "line-opacity": 0.35 },
   });
 
-  // Hover + click
   for (const lyr of [LYR_REAL, LYR_KNN]) {
     map.on("mouseenter", lyr, onHover);
     map.on("mousemove",  lyr, onHover);
@@ -471,37 +463,41 @@ function doyToMonthStr(doy) {
   return MESES[11];
 }
 
-function doyToDate(year, doy) {
-  const d = new Date(year, 0, 1);
-  d.setDate(d.getDate() + Math.round(doy) - 1);
-  return d.toISOString().slice(0, 10);
-}
+// ─────────────────────────────────────────────────────────────
+// Série temporal — ciclos com gaussianas individuais
+// ─────────────────────────────────────────────────────────────
+const CYCLE_PALETTE = [
+  "#FF6B35", "#F7931E", "#FFD23F", "#A8E063",
+  "#06D6A0", "#118AB2", "#8338EC", "#FF006E",
+  "#FB5607", "#3A86FF", "#FFBE0B", "#8AC926",
+];
 
-// ─────────────────────────────────────────────────────────────
-// Série temporal
-// ─────────────────────────────────────────────────────────────
 document.getElementById("btn-close").addEventListener("click", () => {
   document.getElementById("ts-panel").classList.remove("open");
 });
 
 async function loadTimeSeries(hexId, cultura, props) {
-  const panel = document.getElementById("ts-panel");
+  const panel     = document.getElementById("ts-panel");
   const tsLoading = document.getElementById("ts-loading");
   panel.classList.add("open");
   tsLoading.style.display = "flex";
 
-  // Header
-  document.getElementById("ts-hex").textContent = hexId;
+  document.getElementById("ts-hex").textContent  = hexId;
   document.getElementById("ts-meta").textContent =
-    `${CULT_LABELS[cultura] || cultura} · ${props.n_ciclos} ciclos detectados`;
+    `${CULT_LABELS[cultura] || cultura} · carregando…`;
 
   try {
     const res = await fetch(
-      `/api/timeseries?hex_id=${encodeURIComponent(hexId)}&cultura=${encodeURIComponent(cultura)}`
+      `/api/cycles?hex_id=${encodeURIComponent(hexId)}&cultura=${encodeURIComponent(cultura)}`
     );
     if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
     const data = await res.json();
-    renderPills(data.metrics, props.knn);
+
+    const n = data.cycles.length;
+    document.getElementById("ts-meta").textContent =
+      `${CULT_LABELS[cultura] || cultura} · ${n} ciclo${n !== 1 ? "s" : ""} detectado${n !== 1 ? "s" : ""}`;
+
+    renderPills(data.cycles, props.knn);
     renderChart(data);
   } catch(err) {
     document.getElementById("ts-meta").textContent = "⚠ " + err.message;
@@ -510,77 +506,134 @@ async function loadTimeSeries(hexId, cultura, props) {
   }
 }
 
-function renderPills(metrics, isKnn) {
+function renderPills(cycles, isKnn) {
   const el = document.getElementById("ts-pills");
   el.innerHTML = "";
-  metrics.forEach(m => {
-    const prefix = m.tipo_safra === "safra" ? "↑" : "↓";
+  cycles.forEach((c, i) => {
+    const col = CYCLE_PALETTE[i % CYCLE_PALETTE.length];
     el.innerHTML +=
-      `<span class="pill pill-sos">${prefix} SOS ${doyToMonthStr(m.sos_doy)}</span>` +
-      `<span class="pill pill-pos">${prefix} POS ${doyToMonthStr(m.pos_doy)}</span>` +
-      `<span class="pill pill-eos">${prefix} EOS ${doyToMonthStr(m.eos_doy)}</span>`;
+      `<span class="pill" style="background:${col}22;color:${col};border:1px solid ${col}">` +
+      `C${c.cycle_num} · R²=${c.r_squared} · ${c.season_type}</span>`;
   });
   if (isKnn) el.innerHTML += `<span class="pill pill-knn">KNN</span>`;
 }
 
 function renderChart(data) {
   if (tsChart) { tsChart.destroy(); tsChart = null; }
-
   const ctx = document.getElementById("ts-canvas").getContext("2d");
 
-  // Annotations SOS/POS/EOS repetidos por ano
-  const YEARS = [2020, 2021, 2022, 2023, 2024];
+  // Dataset 0 — EVI bruto
+  const datasets = [
+    {
+      label: "EVI bruto",
+      data: data.dates.map((d, i) => ({ x: d, y: data.evi[i] })),
+      borderColor: "rgba(180,180,200,0.45)",
+      backgroundColor: "transparent",
+      borderWidth: 1,
+      pointRadius: 2,
+      pointHoverRadius: 4,
+      tension: 0,
+      fill: false,
+      order: 3,
+    },
+    // Dataset 1 — EVI suavizado
+    {
+      label: "EVI suavizado",
+      data: data.dates.map((d, i) => ({ x: d, y: data.smooth[i] })),
+      borderColor: "#58a6ff",
+      backgroundColor: "rgba(88,166,255,0.07)",
+      borderWidth: 1.5,
+      pointRadius: 0,
+      tension: 0.3,
+      fill: true,
+      order: 2,
+    },
+  ];
+
+  // One Gaussian dataset + annotations per detected cycle
   const annotations = {};
-  const COLORS = { sos: "#4CAF50", pos: "#FFD700", eos: "#F44336" };
 
-  data.metrics.forEach((m, mi) => {
-    const isSafra = m.tipo_safra === "safra";
-    const sfx     = mi > 0 ? `_${mi}` : "";
+  data.cycles.forEach((c, i) => {
+    const col = CYCLE_PALETTE[i % CYCLE_PALETTE.length];
 
-    YEARS.forEach(yr => {
-      // Para safra, POS e EOS cruzam o ano (DOY < 180 → ano+1)
-      const posYr = (isSafra && m.pos_doy < 180) ? yr + 1 : yr;
-      const eosYr = (isSafra && m.eos_doy < 180) ? yr + 1 : yr;
-
-      const showLabel = yr === YEARS[0];
-      const tag = m.tipo_safra === "safra" ? "S" : "s";   // maiúscula=safra, minúscula=safrinha
-
-      annotations[`sos_${yr}${sfx}`] = mkLine(
-        doyToDate(yr,    m.sos_doy), COLORS.sos,
-        showLabel ? `SOS (${tag})` : null, "start"
-      );
-      annotations[`pos_${yr}${sfx}`] = mkLine(
-        doyToDate(posYr, m.pos_doy), COLORS.pos,
-        showLabel ? `POS (${tag})` : null, "center"
-      );
-      annotations[`eos_${yr}${sfx}`] = mkLine(
-        doyToDate(eosYr, m.eos_doy), COLORS.eos,
-        showLabel ? `EOS (${tag})` : null, "end"
-      );
+    // Gaussian curve
+    datasets.push({
+      label: `Ciclo ${c.cycle_num}`,
+      data: c.gauss_dates.map((d, j) => ({ x: d, y: c.gauss_vals[j] })),
+      borderColor: col,
+      backgroundColor: "transparent",
+      borderWidth: 2,
+      borderDash: [5, 3],
+      pointRadius: 0,
+      tension: 0,
+      fill: false,
+      order: 1,
     });
+
+    // SOS — vertical dashed green line
+    annotations[`sos_${i}`] = {
+      type: "line",
+      xMin: c.sos.date, xMax: c.sos.date,
+      borderColor: "#4CAF50",
+      borderWidth: 1.5,
+      borderDash: [4, 3],
+      label: {
+        display: true, content: "SOS",
+        position: "start", yAdjust: -8,
+        color: "#4CAF50", font: { size: 9, weight: "bold" },
+        backgroundColor: "rgba(13,17,23,0.8)", padding: { x: 3, y: 1 },
+      },
+    };
+
+    // EOS — vertical dashed red line
+    annotations[`eos_${i}`] = {
+      type: "line",
+      xMin: c.eos.date, xMax: c.eos.date,
+      borderColor: "#F44336",
+      borderWidth: 1.5,
+      borderDash: [4, 3],
+      label: {
+        display: true, content: "EOS",
+        position: "end", yAdjust: 8,
+        color: "#F44336", font: { size: 9, weight: "bold" },
+        backgroundColor: "rgba(13,17,23,0.8)", padding: { x: 3, y: 1 },
+      },
+    };
+
+    // POS — filled circle at peak
+    annotations[`pos_${i}`] = {
+      type: "point",
+      xValue: c.pos.date,
+      yValue: c.pos.val,
+      backgroundColor: col,
+      borderColor: "#fff",
+      borderWidth: 1.5,
+      radius: 5,
+    };
+
+    // R² label above POS peak
+    annotations[`r2_${i}`] = {
+      type: "label",
+      xValue: c.pos.date,
+      yValue: c.pos.val,
+      yAdjust: -20,
+      content: `R²=${c.r_squared}  ${c.season_type}`,
+      color: col,
+      font: { size: 9, weight: "bold" },
+      backgroundColor: "rgba(13,17,23,0.85)",
+      padding: { x: 4, y: 2 },
+      borderRadius: 3,
+    };
   });
 
   tsChart = new Chart(ctx, {
     type: "line",
-    data: {
-      labels: data.dates,
-      datasets: [{
-        label: "EVI",
-        data: data.evi,
-        borderColor: "#58a6ff",
-        backgroundColor: "rgba(88,166,255,0.08)",
-        borderWidth: 1.5,
-        pointRadius: 2,
-        pointHoverRadius: 4,
-        tension: 0.35,
-        fill: true,
-      }],
-    },
+    data: { datasets },
     options: {
       responsive: true,
       maintainAspectRatio: false,
       animation: false,
-      interaction: { mode: "index", intersect: false },
+      interaction: { mode: "nearest", intersect: false },
       scales: {
         x: {
           type: "time",
@@ -601,30 +654,14 @@ function renderChart(data) {
           backgroundColor: "#161b22", borderColor: "#30363d", borderWidth: 1,
           titleColor: "#8b949e", bodyColor: "#e6edf3",
           callbacks: {
-            title: items => items[0].label.slice(0, 10),
-            label: item => ` EVI: ${item.formattedValue}`,
+            title: items => (items[0].label || "").slice(0, 10),
+            label: item => ` ${item.dataset.label}: ${(+item.raw.y).toFixed(4)}`,
           },
         },
         annotation: { annotations },
       },
     },
   });
-}
-
-function mkLine(xVal, color, label, yPos) {
-  return {
-    type: "line",
-    xMin: xVal, xMax: xVal,
-    borderColor: color,
-    borderWidth: 1.5,
-    borderDash: [4, 3],
-    label: label ? {
-      display: true, content: label,
-      position: yPos, yAdjust: yPos === "start" ? -6 : yPos === "end" ? 6 : 0,
-      color, font: { size: 9 },
-      backgroundColor: "transparent", padding: 0,
-    } : { display: false },
-  };
 }
 </script>
 

@@ -10,10 +10,12 @@ Acesse http://localhost:8000
 
 from __future__ import annotations
 import logging
+import sys
 from pathlib import Path
 from typing import Optional
 
 import h3
+import numpy as np
 import pandas as pd
 import uvicorn
 from fastapi import FastAPI, HTTPException
@@ -27,11 +29,24 @@ PHENO_PATH = ROOT / "data/output/fenologia_brasil_knn.parquet"
 PARTS_DIR  = ROOT / "data/output/_parts"
 HTML_PATH  = Path(__file__).parent / "index.html"
 
+# Adiciona fenologia/ ao path para importar fenologia.phenophase
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+MIN_CYCLE_DAYS = {
+    "soja": 120, "cana": 150, "arroz": 100, "algodao": 110,
+    "cafe": 120, "citrus": 120, "dende": 120,
+    "outras_lavouras_temporarias": 100, "outras_lavouras_perenes": 120,
+    "segunda_safra": 90, "segunda_safra_algodao": 100,
+    "segunda_safra_outras_temporarias": 90,
+}
+
 app = FastAPI(title="Fenologia Brasil")
 
 _pheno: Optional[pd.DataFrame] = None
-_ts: Optional[pd.DataFrame] = None    # série temporal indexada por id_hexagono
-_grid_cache: dict = {}                # (cultura, tipo) → GeoJSON dict
+_ts: Optional[pd.DataFrame] = None
+_grid_cache: dict = {}
+_cycles_cache: dict = {}   # (hex_id, cultura) → cycles response
 
 
 # ---------------------------------------------------------------------------
@@ -89,15 +104,13 @@ def api_culturas():
 def api_grid(cultura: str, tipo: str):
     key = (cultura, tipo)
     if key not in _grid_cache:
-        sub = _pheno[
-            (_pheno["cultura"] == cultura) & (_pheno["tipo_safra"] == tipo)
-        ]
+        sub = _pheno[(_pheno["cultura"] == cultura) & (_pheno["tipo_safra"] == tipo)]
         features = []
         for _, row in sub.iterrows():
             try:
                 bnd    = h3.cell_to_boundary(row["id_hexagono"])
                 coords = [[lon, lat] for lat, lon in bnd]
-                coords.append(coords[0])   # fecha o polígono
+                coords.append(coords[0])
                 features.append({
                     "type": "Feature",
                     "geometry": {"type": "Polygon", "coordinates": [coords]},
@@ -114,40 +127,104 @@ def api_grid(cultura: str, tipo: str):
             except Exception:
                 continue
         _grid_cache[key] = {"type": "FeatureCollection", "features": features}
-        log.info(f"grid {cultura}/{tipo}: {len(features):,} hexágonos gerados")
+        log.info(f"grid {cultura}/{tipo}: {len(features):,} hexágonos")
 
     return JSONResponse(content=_grid_cache[key])
 
 
-@app.get("/api/timeseries")
-def api_timeseries(hex_id: str, cultura: str):
+@app.get("/api/cycles")
+def api_cycles(hex_id: str, cultura: str):
+    """
+    Re-roda extract_phenometrics para o hexágono e retorna:
+      - série EVI bruta + suavizada
+      - por ciclo: gaussiana, SOS/POS/EOS efetivos, R²
+    """
+    cache_key = (hex_id, cultura)
+    if cache_key in _cycles_cache:
+        return JSONResponse(_cycles_cache[cache_key])
+
+    from fenologia.phenophase import extract_phenometrics, adaptive_smoothing
+
     col = f"evi_medio_{cultura}"
     if hex_id not in _ts.index:
         raise HTTPException(404, "Hexágono não encontrado na série temporal")
 
-    df = _ts.loc[[hex_id], ["data", col]].dropna(subset=[col]).sort_values("data")
+    df = (_ts.loc[[hex_id], ["data", col]]
+            .dropna(subset=[col])
+            .sort_values("data"))
 
-    pheno_rows = _pheno[
-        (_pheno["id_hexagono"] == hex_id) & (_pheno["cultura"] == cultura)
-    ]
-    metrics = [
-        {
-            "tipo_safra": r["tipo_safra"],
-            "sos_doy":    round(float(r["sos_doy"]), 1),
-            "pos_doy":    round(float(r["pos_doy"]), 1),
-            "eos_doy":    round(float(r["eos_doy"]), 1),
-            "n_ciclos":   int(r["n_ciclos"]),
-            "knn":        bool(r.get("interpolated", False)),
-        }
-        for _, r in pheno_rows.iterrows()
-    ]
+    if len(df) < 10:
+        raise HTTPException(422, "Série temporal muito curta para detecção de ciclos")
 
-    return {
+    min_days = MIN_CYCLE_DAYS.get(cultura, 90)
+
+    # DataFrame no formato esperado pelo phenophase
+    ts_df = df.rename(columns={"data": "datetime", col: "NDVI_mean"}).copy()
+
+    result = extract_phenometrics(
+        ts_df,
+        ndvi_column="NDVI_mean",
+        min_cycle_length_days=min_days,
+        smoothing_method="both",
+        quality_threshold=0.5,
+    )
+
+    # Série suavizada (mesmo método do phenophase)
+    ndvi_arr  = ts_df["NDVI_mean"].values.astype(float)
+    dates_arr = ts_df["datetime"].values
+    ndvi_smooth = adaptive_smoothing(ndvi_arr, dates_arr, method="both")
+
+    dates_str = [str(d)[:10] for d in df["data"]]
+
+    # Serializa ciclos bem-sucedidos
+    cycles_out = []
+    for c in result.get("cycles", []):
+        if not c.get("fit_success"):
+            continue
+        gp = c["gaussian_params"]
+        ph = c["phenophase_dates"]
+        pv = c["phenophase_values"]
+
+        # Gera pontos densos da gaussiana (a cada 4 dias no intervalo do ciclo)
+        cs = pd.Timestamp(c["cycle_start"])
+        ce = pd.Timestamp(c["cycle_end"])
+        n_pts = max(60, int(c["cycle_length_days"] / 3))
+        gauss_dates, gauss_vals = [], []
+        for i in range(n_pts + 1):
+            t = cs + pd.Timedelta(days=i * c["cycle_length_days"] / n_pts)
+            if t > ce:
+                break
+            x = (t - cs).total_seconds() / 86400
+            y = (gp["amplitude"]
+                 * np.exp(-0.5 * ((x - gp["mean_days"]) / gp["std_dev_days"]) ** 2)
+                 + gp["offset"])
+            gauss_dates.append(str(t)[:10])
+            gauss_vals.append(round(float(y), 4))
+
+        cycles_out.append({
+            "cycle_num":         c["cycle_num"],
+            "season_type":       c["season_type"],
+            "r_squared":         round(c["r_squared"], 3),
+            "cycle_start":       str(cs)[:10],
+            "cycle_end":         str(ce)[:10],
+            "cycle_length_days": round(c["cycle_length_days"]),
+            "gauss_dates":       gauss_dates,
+            "gauss_vals":        gauss_vals,
+            "sos": {"date": str(ph["sos"])[:10], "val": round(float(pv["sos_ndvi"]), 4)},
+            "pos": {"date": str(ph["pos"])[:10], "val": round(float(pv["pos_ndvi"]), 4)},
+            "eos": {"date": str(ph["eos"])[:10], "val": round(float(pv["eos_ndvi"]), 4)},
+        })
+
+    out = {
         "hex_id":  hex_id,
-        "dates":   [str(d)[:10] for d in df["data"]],
-        "evi":     [round(float(v), 4) for v in df[col]],
-        "metrics": metrics,
+        "cultura": cultura,
+        "dates":   dates_str,
+        "evi":     [round(float(v), 4) for v in ndvi_arr],
+        "smooth":  [round(float(v), 4) for v in ndvi_smooth],
+        "cycles":  cycles_out,
     }
+    _cycles_cache[cache_key] = out
+    return JSONResponse(out)
 
 
 if __name__ == "__main__":
