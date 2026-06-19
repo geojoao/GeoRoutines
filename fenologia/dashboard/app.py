@@ -166,7 +166,7 @@ def api_cycles(hex_id: str, cultura: str):
         ndvi_column="NDVI_mean",
         min_cycle_length_days=min_days,
         smoothing_method="both",
-        quality_threshold=0.5,
+        quality_threshold=0.85,
     )
 
     # Série suavizada (mesmo método do phenophase)

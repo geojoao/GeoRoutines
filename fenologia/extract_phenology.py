@@ -55,7 +55,7 @@ MIN_CYCLE_DAYS = {
 }
 
 MIN_EVI_AMPLITUDE = 0.08
-MIN_R2_PER_CYCLE = 0.70  # descarta ciclos com ajuste gaussiano ruim
+MIN_R2_PER_CYCLE = 0.85  # descarta ciclos com ajuste gaussiano ruim
 
 PARTS_DIR = Path("data/output/_parts")
 OUTPUT = Path("data/output/fenologia_brasil.parquet")
@@ -90,7 +90,7 @@ def _worker(args):
             ndvi_column="NDVI_mean",
             min_cycle_length_days=min_days,
             smoothing_method="both",
-            quality_threshold=0.5,
+            quality_threshold=0.85,
         )
     except Exception:
         return []
