@@ -1,8 +1,10 @@
 """
-Exporta fenologia_brasil.parquet como GeoPackage (.gpkg) para uso no QGIS.
+Exporta fenologia_brasil.parquet como múltiplos GeoPackages para uso no QGIS.
 
-Gera fenologia_brasil.gpkg com uma camada por cultura (12 camadas).
-Cada camada contém safra e safrinha juntas, diferenciadas pela coluna tipo_safra.
+Gera um arquivo .gpkg por combinação cultura+tipo_safra, ex:
+  soja_safra.gpkg, soja_safrinha.gpkg, algodao_safra.gpkg, ...
+
+Saída: data/output/gpkg/
 """
 
 import warnings
@@ -19,22 +21,7 @@ except ImportError:
     raise ImportError("pip install h3")
 
 INPUT = Path("data/output/fenologia_brasil.parquet")
-OUTPUT = Path("data/output/fenologia_brasil.gpkg")
-
-CULTURA_LABELS = {
-    "soja": "Soja",
-    "cana": "Cana_de_Acucar",
-    "arroz": "Arroz",
-    "algodao": "Algodao",
-    "cafe": "Cafe",
-    "citrus": "Citrus",
-    "dende": "Dende",
-    "outras_lavouras_temporarias": "Outras_Temporarias",
-    "outras_lavouras_perenes": "Outras_Perenes",
-    "segunda_safra": "Segunda_Safra",
-    "segunda_safra_algodao": "Segunda_Safra_Algodao",
-    "segunda_safra_outras_temporarias": "Segunda_Safra_Outras_Temp",
-}
+OUTPUT_DIR = Path("data/output/gpkg")
 
 
 def hex_to_polygon(hex_id: str):
@@ -60,22 +47,29 @@ def main():
     df = pd.read_parquet(INPUT)
     print(f"  {len(df):,} registros, {df['cultura'].nunique()} culturas")
 
-    OUTPUT.unlink(missing_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    culturas = sorted(df["cultura"].unique())
-    print(f"\nExportando {len(culturas)} camadas para {OUTPUT.name}...")
+    combos = (
+        df.groupby(["cultura", "tipo_safra"])
+        .size()
+        .reset_index(name="n")
+        [lambda x: x["n"] >= 5]
+    )
+    print(f"\nExportando {len(combos)} arquivos .gpkg em {OUTPUT_DIR}/...")
 
-    for cultura in culturas:
-        layer_name = CULTURA_LABELS.get(cultura, cultura)
-        sub = df[df["cultura"] == cultura].copy()
-        print(f"  [{layer_name}] {len(sub):,} feições (safra+safrinha)...", flush=True)
+    for _, row in combos.iterrows():
+        cultura, tipo = row["cultura"], row["tipo_safra"]
+        fname = f"{cultura}_{tipo}.gpkg"
+        out_path = OUTPUT_DIR / fname
+        out_path.unlink(missing_ok=True)
+
+        sub = df[(df["cultura"] == cultura) & (df["tipo_safra"] == tipo)].copy()
         gdf = build_geodataframe(sub)
-        gdf.to_file(OUTPUT, layer=layer_name, driver="GPKG")
+        gdf.to_file(out_path, layer=f"{cultura}_{tipo}", driver="GPKG")
+        print(f"  {fname}: {len(gdf):,} feições")
 
-    print(f"\nSalvo: {OUTPUT}")
-    print(f"  {len(culturas)} camadas — uma por cultura, com coluna tipo_safra para filtrar safra/safrinha")
-    print("\nNo QGIS: arraste o .gpkg para a janela do projeto")
-    print("  ou Camada → Adicionar Camada → Adicionar Camada Vetorial")
+    print(f"\nTodos os .gpkg salvos em: {OUTPUT_DIR}/")
+    print("No QGIS: arraste qualquer .gpkg para a janela do projeto.")
 
 
 if __name__ == "__main__":
