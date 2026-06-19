@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Fenologia Brasil</title>
+
+<link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet">
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1/dist/chartjs-plugin-annotation.min.js"></script>
+
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  display: flex; height: 100vh; overflow: hidden;
+  background: #0d1117; color: #e6edf3;
+  font-family: -apple-system, 'Segoe UI', sans-serif; font-size: 13px;
+}
+
+/* ── Sidebar ─────────────────────────────────────────────── */
+#sidebar {
+  width: 270px; flex-shrink: 0;
+  background: #161b22; border-right: 1px solid #30363d;
+  display: flex; flex-direction: column; gap: 14px;
+  padding: 16px; overflow-y: auto;
+}
+#sidebar h1 { font-size: 15px; font-weight: 700; color: #58a6ff; letter-spacing: .3px; }
+
+.field { display: flex; flex-direction: column; gap: 4px; }
+.field label { font-size: 11px; color: #8b949e; text-transform: uppercase; letter-spacing: .5px; }
+
+select {
+  width: 100%; padding: 7px 10px;
+  background: #21262d; border: 1px solid #30363d; border-radius: 6px;
+  color: #e6edf3; font-size: 13px; cursor: pointer; appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%238b949e' d='M1 1l5 5 5-5'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 10px center;
+}
+select:focus { outline: none; border-color: #58a6ff; }
+
+/* campo toggle */
+.campo-row { display: flex; gap: 5px; }
+.campo-row button {
+  flex: 1; padding: 6px 4px; font-size: 11px; font-weight: 600;
+  background: #21262d; border: 1px solid #30363d; border-radius: 6px;
+  color: #8b949e; cursor: pointer; transition: all .15s;
+}
+.campo-row button:hover { border-color: #58a6ff; color: #e6edf3; }
+.campo-row button.active { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+
+/* load button */
+#btn-load {
+  width: 100%; padding: 9px; font-size: 13px; font-weight: 700;
+  background: #1f6feb; border: none; border-radius: 6px;
+  color: #fff; cursor: pointer; transition: background .15s; letter-spacing: .3px;
+}
+#btn-load:hover { background: #388bfd; }
+#btn-load:disabled { background: #21262d; color: #484f58; cursor: not-allowed; }
+
+/* divider */
+.divider { border: none; border-top: 1px solid #30363d; }
+
+/* stats */
+#stats { font-size: 12px; color: #8b949e; line-height: 1.8; }
+#stats b { color: #e6edf3; }
+
+/* opacity slider */
+.slider-row { display: flex; align-items: center; gap: 8px; }
+.slider-row input[type=range] { flex: 1; accent-color: #58a6ff; }
+.slider-row span { font-size: 11px; color: #8b949e; width: 28px; text-align: right; }
+
+/* knn toggle */
+.toggle-row { display: flex; align-items: center; gap: 8px; }
+.toggle-row label { font-size: 12px; color: #8b949e; cursor: pointer; flex: 1; }
+.toggle-row input[type=checkbox] { accent-color: #58a6ff; width: 14px; height: 14px; cursor: pointer; }
+
+/* legend */
+#legend-wrap { display: flex; flex-direction: column; gap: 5px; }
+#legend-wrap label { font-size: 11px; color: #8b949e; text-transform: uppercase; letter-spacing: .5px; }
+#legend-canvas { width: 100%; height: 14px; border-radius: 3px; }
+#legend-ticks {
+  display: flex; justify-content: space-between;
+  font-size: 10px; color: #484f58;
+}
+
+/* ── Main ────────────────────────────────────────────────── */
+#main { flex: 1; display: flex; flex-direction: column; position: relative; min-width: 0; }
+
+#map { flex: 1; min-height: 0; }
+
+/* loading overlay */
+#loading {
+  display: none; position: absolute;
+  top: 14px; left: 50%; transform: translateX(-50%);
+  background: rgba(22,27,34,.95); border: 1px solid #30363d; border-radius: 8px;
+  padding: 10px 20px; font-size: 13px; color: #58a6ff; z-index: 10;
+  white-space: nowrap;
+}
+
+/* ── Time series panel ───────────────────────────────────── */
+#ts-panel {
+  height: 0; overflow: hidden;
+  transition: height .25s ease;
+  background: #0d1117; border-top: 1px solid #30363d;
+  display: flex; flex-direction: column;
+}
+#ts-panel.open { height: 250px; }
+
+#ts-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 6px 14px; background: #161b22; border-bottom: 1px solid #30363d;
+  flex-shrink: 0;
+}
+#ts-info { display: flex; flex-direction: column; gap: 2px; }
+#ts-hex  { font-family: monospace; font-size: 11px; color: #58a6ff; }
+#ts-meta { font-size: 11px; color: #8b949e; }
+#ts-pills { display: flex; gap: 6px; margin-top: 2px; }
+.pill {
+  font-size: 10px; padding: 1px 7px; border-radius: 10px; font-weight: 600;
+}
+.pill-sos { background: rgba(76,175,80,.2);  color: #4CAF50; border: 1px solid #4CAF50; }
+.pill-pos { background: rgba(255,215,0,.15); color: #FFD700; border: 1px solid #FFD700; }
+.pill-eos { background: rgba(244,67,54,.2);  color: #F44336; border: 1px solid #F44336; }
+.pill-knn { background: rgba(255,165,0,.15); color: #FFA500; border: 1px solid #FFA500; }
+
+#btn-close {
+  background: none; border: none; color: #8b949e;
+  cursor: pointer; font-size: 18px; line-height: 1; padding: 0 4px;
+  transition: color .1s;
+}
+#btn-close:hover { color: #e6edf3; }
+
+#ts-body { flex: 1; padding: 6px 14px 10px; min-height: 0; position: relative; }
+#ts-body canvas { width: 100% !important; height: 100% !important; }
+#ts-loading {
+  display: none; position: absolute; inset: 0;
+  background: rgba(13,17,23,.85); display: flex;
+  align-items: center; justify-content: center;
+  font-size: 13px; color: #58a6ff;
+}
+
+/* ── MapLibre popup ──────────────────────────────────────── */
+.maplibregl-popup-content {
+  background: #161b22 !important; border: 1px solid #30363d !important;
+  border-radius: 6px !important; color: #e6edf3 !important;
+  font-size: 12px !important; padding: 8px 12px !important;
+  box-shadow: 0 4px 12px rgba(0,0,0,.5) !important;
+  max-width: 240px !important;
+}
+.maplibregl-popup-tip { display: none !important; }
+.popup-row { display: flex; justify-content: space-between; gap: 10px; line-height: 1.8; }
+.popup-key { color: #8b949e; }
+.popup-val { color: #e6edf3; font-weight: 600; }
+.popup-knn { color: #FFA500; font-size: 11px; margin-top: 2px; }
+</style>
+</head>
+<body>
+
+<!-- ── Sidebar ───────────────────────────────────────────── -->
+<div id="sidebar">
+  <h1>🌿 Fenologia Brasil</h1>
+
+  <div class="field">
+    <label>Cultura</label>
+    <select id="sel-cultura"></select>
+  </div>
+
+  <div class="field">
+    <label>Tipo de Safra</label>
+    <select id="sel-tipo">
+      <option value="safra">Safra — estação principal</option>
+      <option value="safrinha">Safrinha — segunda safra</option>
+    </select>
+  </div>
+
+  <div class="field">
+    <label>Colorir por</label>
+    <div class="campo-row">
+      <button class="active" data-campo="sos_doy">SOS</button>
+      <button data-campo="pos_doy">POS</button>
+      <button data-campo="eos_doy">EOS</button>
+    </div>
+  </div>
+
+  <button id="btn-load">▶ Carregar Grid</button>
+
+  <hr class="divider">
+
+  <div class="field">
+    <label>Opacidade — dados reais</label>
+    <div class="slider-row">
+      <input type="range" id="sl-opacity" min="10" max="100" value="85">
+      <span id="sl-val">85%</span>
+    </div>
+  </div>
+
+  <div class="toggle-row">
+    <input type="checkbox" id="chk-knn" checked>
+    <label for="chk-knn">Mostrar hexágonos KNN (interpolados)</label>
+  </div>
+
+  <hr class="divider">
+
+  <div id="stats">Nenhum grid carregado.</div>
+
+  <hr class="divider">
+
+  <div id="legend-wrap">
+    <label>Mês do DOY</label>
+    <canvas id="legend-canvas" width="238" height="14"></canvas>
+    <div id="legend-ticks">
+      <span>Jan</span><span>Mar</span><span>Mai</span>
+      <span>Jul</span><span>Set</span><span>Nov</span><span>Jan</span>
+    </div>
+  </div>
+</div>
+
+<!-- ── Main ──────────────────────────────────────────────── -->
+<div id="main">
+  <div id="map"></div>
+  <div id="loading">Gerando geometrias…</div>
+
+  <div id="ts-panel">
+    <div id="ts-header">
+      <div id="ts-info">
+        <div id="ts-hex">—</div>
+        <div id="ts-meta">Clique num hexágono para ver a série temporal</div>
+        <div id="ts-pills"></div>
+      </div>
+      <button id="btn-close">✕</button>
+    </div>
+    <div id="ts-body">
+      <div id="ts-loading">Carregando…</div>
+      <canvas id="ts-canvas"></canvas>
+    </div>
+  </div>
+</div>
+
+<script>
+// ─────────────────────────────────────────────────────────────
+// Twilight_shifted — stops DOY/365 → cor
+// ─────────────────────────────────────────────────────────────
+const TW = [
+  0.000, "rgb(10,5,18)",
+  0.085, "rgb(65,10,52)",
+  0.162, "rgb(148,35,42)",
+  0.247, "rgb(222,108,75)",
+  0.329, "rgb(248,206,188)",
+  0.414, "rgb(252,245,248)",
+  0.496, "rgb(242,244,255)",
+  0.581, "rgb(182,212,252)",
+  0.666, "rgb(82,142,222)",
+  0.748, "rgb(24,72,178)",
+  0.833, "rgb(18,28,105)",
+  0.915, "rgb(22,10,58)",
+  1.000, "rgb(10,5,18)",
+];
+
+function colorExpr(campo) {
+  return [
+    "let", "t",
+    ["/", ["%", ["get", campo], 365], 365],
+    ["interpolate", ["linear"], ["var", "t"], ...TW]
+  ];
+}
+
+// ─────────────────────────────────────────────────────────────
+// Mapa
+// ─────────────────────────────────────────────────────────────
+const map = new maplibregl.Map({
+  container: "map",
+  style: "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
+  center: [-52, -14],
+  zoom: 4,
+  maxZoom: 12,
+  attributionControl: false,
+});
+map.addControl(new maplibregl.NavigationControl({ visualizePitch: false }), "top-right");
+map.addControl(new maplibregl.ScaleControl({ unit: "metric" }), "bottom-left");
+map.addControl(new maplibregl.AttributionControl({ compact: true }), "bottom-right");
+
+const popup = new maplibregl.Popup({
+  closeButton: false, closeOnClick: false, maxWidth: "260px"
+});
+
+const SRC = "fenologia";
+const LYR_REAL = "hex-real";
+const LYR_KNN  = "hex-knn";
+const LYR_LINE = "hex-line";
+
+let currentCampo = "sos_doy";
+let tsChart = null;
+
+map.on("load", async () => {
+  // Source vazio
+  map.addSource(SRC, {
+    type: "geojson",
+    data: { type: "FeatureCollection", features: [] },
+  });
+
+  // Camada dados reais (opaca)
+  map.addLayer({
+    id: LYR_REAL, type: "fill", source: SRC,
+    filter: ["==", ["get", "knn"], false],
+    paint: {
+      "fill-color":   colorExpr(currentCampo),
+      "fill-opacity": 0.85,
+    },
+  });
+
+  // Camada KNN (semi-transparente)
+  map.addLayer({
+    id: LYR_KNN, type: "fill", source: SRC,
+    filter: ["==", ["get", "knn"], true],
+    paint: {
+      "fill-color":   colorExpr(currentCampo),
+      "fill-opacity": 0.38,
+    },
+  });
+
+  // Bordas
+  map.addLayer({
+    id: LYR_LINE, type: "line", source: SRC,
+    paint: { "line-color": "#000", "line-width": 0.3, "line-opacity": 0.35 },
+  });
+
+  // Hover + click
+  for (const lyr of [LYR_REAL, LYR_KNN]) {
+    map.on("mouseenter", lyr, onHover);
+    map.on("mousemove",  lyr, onHover);
+    map.on("mouseleave", lyr, () => {
+      map.getCanvas().style.cursor = "";
+      popup.remove();
+    });
+    map.on("click", lyr, onClick);
+  }
+
+  drawLegend();
+  await loadCulturas();
+});
+
+function onHover(e) {
+  map.getCanvas().style.cursor = "pointer";
+  const p = e.features[0].properties;
+  const knnBadge = p.knn
+    ? `<div class="popup-knn">⚠ KNN interpolado</div>` : "";
+  popup.setLngLat(e.lngLat).setHTML(`
+    <div class="popup-row"><span class="popup-key">SOS</span><span class="popup-val">${p.sos_doy} <small style="color:#8b949e">${doyToMonthStr(p.sos_doy)}</small></span></div>
+    <div class="popup-row"><span class="popup-key">POS</span><span class="popup-val">${p.pos_doy} <small style="color:#8b949e">${doyToMonthStr(p.pos_doy)}</small></span></div>
+    <div class="popup-row"><span class="popup-key">EOS</span><span class="popup-val">${p.eos_doy} <small style="color:#8b949e">${doyToMonthStr(p.eos_doy)}</small></span></div>
+    <div class="popup-row"><span class="popup-key">R²</span><span class="popup-val">${p.r2}</span></div>
+    <div class="popup-row"><span class="popup-key">Ciclos</span><span class="popup-val">${p.n_ciclos}</span></div>
+    ${knnBadge}
+  `).addTo(map);
+}
+
+function onClick(e) {
+  const p = e.features[0].properties;
+  const cultura = document.getElementById("sel-cultura").value;
+  loadTimeSeries(p.id, cultura, p);
+}
+
+// ─────────────────────────────────────────────────────────────
+// Culturas
+// ─────────────────────────────────────────────────────────────
+const CULT_LABELS = {
+  soja: "Soja", cana: "Cana-de-Açúcar", arroz: "Arroz",
+  algodao: "Algodão", cafe: "Café", citrus: "Citrus", dende: "Dendê",
+  outras_lavouras_temporarias: "Outras Temporárias",
+  outras_lavouras_perenes: "Outras Perenes",
+  segunda_safra: "Segunda Safra",
+  segunda_safra_algodao: "2ª Safra Algodão",
+  segunda_safra_outras_temporarias: "2ª Safra Outras Temp.",
+};
+
+async function loadCulturas() {
+  const data = await (await fetch("/api/culturas")).json();
+  const sel  = document.getElementById("sel-cultura");
+  sel.innerHTML = "";
+  for (const c of Object.keys(data).sort()) {
+    const o = document.createElement("option");
+    o.value = c; o.textContent = CULT_LABELS[c] || c;
+    sel.appendChild(o);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Grid
+// ─────────────────────────────────────────────────────────────
+document.getElementById("btn-load").addEventListener("click", async () => {
+  const cultura = document.getElementById("sel-cultura").value;
+  const tipo    = document.getElementById("sel-tipo").value;
+  if (!cultura) return;
+
+  const btn  = document.getElementById("btn-load");
+  const info = document.getElementById("loading");
+  btn.disabled = true; info.style.display = "block";
+
+  try {
+    const res  = await fetch(`/api/grid?cultura=${encodeURIComponent(cultura)}&tipo=${encodeURIComponent(tipo)}`);
+    const geojson = await res.json();
+    map.getSource(SRC).setData(geojson);
+
+    const n     = geojson.features.length;
+    const nKnn  = geojson.features.filter(f => f.properties.knn).length;
+    const nReal = n - nKnn;
+    document.getElementById("stats").innerHTML =
+      `<b>${nReal.toLocaleString("pt-BR")}</b> hexágonos reais<br>
+       <b>${nKnn.toLocaleString("pt-BR")}</b> interpolados (KNN)<br>
+       Total: <b>${n.toLocaleString("pt-BR")}</b>`;
+  } catch(err) {
+    alert("Erro: " + err.message);
+  } finally {
+    btn.disabled = false; info.style.display = "none";
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+// Campo SOS / POS / EOS
+// ─────────────────────────────────────────────────────────────
+document.querySelectorAll(".campo-row button").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".campo-row button").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    currentCampo = btn.dataset.campo;
+    map.setPaintProperty(LYR_REAL, "fill-color", colorExpr(currentCampo));
+    map.setPaintProperty(LYR_KNN,  "fill-color", colorExpr(currentCampo));
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// Opacidade
+// ─────────────────────────────────────────────────────────────
+document.getElementById("sl-opacity").addEventListener("input", (e) => {
+  const v = e.target.value / 100;
+  document.getElementById("sl-val").textContent = e.target.value + "%";
+  map.setPaintProperty(LYR_REAL, "fill-opacity", v);
+  map.setPaintProperty(LYR_KNN,  "fill-opacity", Math.min(v * 0.45, 0.45));
+});
+
+// ─────────────────────────────────────────────────────────────
+// Toggle KNN
+// ─────────────────────────────────────────────────────────────
+document.getElementById("chk-knn").addEventListener("change", (e) => {
+  map.setLayoutProperty(LYR_KNN, "visibility", e.target.checked ? "visible" : "none");
+});
+
+// ─────────────────────────────────────────────────────────────
+// Legenda
+// ─────────────────────────────────────────────────────────────
+function drawLegend() {
+  const canvas = document.getElementById("legend-canvas");
+  const ctx    = canvas.getContext("2d");
+  const grad   = ctx.createLinearGradient(0, 0, canvas.width, 0);
+  for (let i = 0; i < TW.length; i += 2) grad.addColorStop(TW[i], TW[i + 1]);
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+}
+
+// ─────────────────────────────────────────────────────────────
+// Helpers DOY
+// ─────────────────────────────────────────────────────────────
+const MESES = ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"];
+const MES_DOYS = [1,32,60,91,121,152,182,213,244,274,305,335];
+
+function doyToMonthStr(doy) {
+  doy = Math.round(doy) % 365;
+  for (let i = 0; i < 11; i++) if (doy < MES_DOYS[i+1]) return MESES[i];
+  return MESES[11];
+}
+
+function doyToDate(year, doy) {
+  const d = new Date(year, 0, 1);
+  d.setDate(d.getDate() + Math.round(doy) - 1);
+  return d.toISOString().slice(0, 10);
+}
+
+// ─────────────────────────────────────────────────────────────
+// Série temporal
+// ─────────────────────────────────────────────────────────────
+document.getElementById("btn-close").addEventListener("click", () => {
+  document.getElementById("ts-panel").classList.remove("open");
+});
+
+async function loadTimeSeries(hexId, cultura, props) {
+  const panel = document.getElementById("ts-panel");
+  const tsLoading = document.getElementById("ts-loading");
+  panel.classList.add("open");
+  tsLoading.style.display = "flex";
+
+  // Header
+  document.getElementById("ts-hex").textContent = hexId;
+  document.getElementById("ts-meta").textContent =
+    `${CULT_LABELS[cultura] || cultura} · ${props.n_ciclos} ciclos detectados`;
+
+  try {
+    const res = await fetch(
+      `/api/timeseries?hex_id=${encodeURIComponent(hexId)}&cultura=${encodeURIComponent(cultura)}`
+    );
+    if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
+    const data = await res.json();
+    renderPills(data.metrics, props.knn);
+    renderChart(data);
+  } catch(err) {
+    document.getElementById("ts-meta").textContent = "⚠ " + err.message;
+  } finally {
+    tsLoading.style.display = "none";
+  }
+}
+
+function renderPills(metrics, isKnn) {
+  const el = document.getElementById("ts-pills");
+  el.innerHTML = "";
+  metrics.forEach(m => {
+    const prefix = m.tipo_safra === "safra" ? "↑" : "↓";
+    el.innerHTML +=
+      `<span class="pill pill-sos">${prefix} SOS ${doyToMonthStr(m.sos_doy)}</span>` +
+      `<span class="pill pill-pos">${prefix} POS ${doyToMonthStr(m.pos_doy)}</span>` +
+      `<span class="pill pill-eos">${prefix} EOS ${doyToMonthStr(m.eos_doy)}</span>`;
+  });
+  if (isKnn) el.innerHTML += `<span class="pill pill-knn">KNN</span>`;
+}
+
+function renderChart(data) {
+  if (tsChart) { tsChart.destroy(); tsChart = null; }
+
+  const ctx = document.getElementById("ts-canvas").getContext("2d");
+
+  // Annotations SOS/POS/EOS repetidos por ano
+  const YEARS = [2020, 2021, 2022, 2023, 2024];
+  const annotations = {};
+  const COLORS = { sos: "#4CAF50", pos: "#FFD700", eos: "#F44336" };
+
+  data.metrics.forEach((m, mi) => {
+    const isSafra = m.tipo_safra === "safra";
+    const sfx     = mi > 0 ? `_${mi}` : "";
+
+    YEARS.forEach(yr => {
+      // Para safra, POS e EOS cruzam o ano (DOY < 180 → ano+1)
+      const posYr = (isSafra && m.pos_doy < 180) ? yr + 1 : yr;
+      const eosYr = (isSafra && m.eos_doy < 180) ? yr + 1 : yr;
+
+      const showLabel = yr === YEARS[0];
+      const tag = m.tipo_safra === "safra" ? "S" : "s";   // maiúscula=safra, minúscula=safrinha
+
+      annotations[`sos_${yr}${sfx}`] = mkLine(
+        doyToDate(yr,    m.sos_doy), COLORS.sos,
+        showLabel ? `SOS (${tag})` : null, "start"
+      );
+      annotations[`pos_${yr}${sfx}`] = mkLine(
+        doyToDate(posYr, m.pos_doy), COLORS.pos,
+        showLabel ? `POS (${tag})` : null, "center"
+      );
+      annotations[`eos_${yr}${sfx}`] = mkLine(
+        doyToDate(eosYr, m.eos_doy), COLORS.eos,
+        showLabel ? `EOS (${tag})` : null, "end"
+      );
+    });
+  });
+
+  tsChart = new Chart(ctx, {
+    type: "line",
+    data: {
+      labels: data.dates,
+      datasets: [{
+        label: "EVI",
+        data: data.evi,
+        borderColor: "#58a6ff",
+        backgroundColor: "rgba(88,166,255,0.08)",
+        borderWidth: 1.5,
+        pointRadius: 2,
+        pointHoverRadius: 4,
+        tension: 0.35,
+        fill: true,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      interaction: { mode: "index", intersect: false },
+      scales: {
+        x: {
+          type: "time",
+          time: { unit: "month", displayFormats: { month: "MMM yy" } },
+          grid: { color: "#21262d" },
+          ticks: { color: "#8b949e", font: { size: 10 }, maxRotation: 0, maxTicksLimit: 20 },
+        },
+        y: {
+          min: 0, max: 1,
+          grid: { color: "#21262d" },
+          ticks: { color: "#8b949e", font: { size: 10 } },
+          title: { display: true, text: "EVI", color: "#8b949e", font: { size: 10 } },
+        },
+      },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: "#161b22", borderColor: "#30363d", borderWidth: 1,
+          titleColor: "#8b949e", bodyColor: "#e6edf3",
+          callbacks: {
+            title: items => items[0].label.slice(0, 10),
+            label: item => ` EVI: ${item.formattedValue}`,
+          },
+        },
+        annotation: { annotations },
+      },
+    },
+  });
+}
+
+function mkLine(xVal, color, label, yPos) {
+  return {
+    type: "line",
+    xMin: xVal, xMax: xVal,
+    borderColor: color,
+    borderWidth: 1.5,
+    borderDash: [4, 3],
+    label: label ? {
+      display: true, content: label,
+      position: yPos, yAdjust: yPos === "start" ? -6 : yPos === "end" ? 6 : 0,
+      color, font: { size: 9 },
+      backgroundColor: "transparent", padding: 0,
+    } : { display: false },
+  };
+}
+</script>
+
+</body>
+</html>
