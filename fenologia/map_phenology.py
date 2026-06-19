@@ -85,41 +85,12 @@ def get_brazil_outline() -> gpd.GeoDataFrame:
     return world[world["name"] == "Brazil"]
 
 
-# Paleta qualitativa: 12 cores bem distintas entre si, uma por mês.
-# Escolhidas para máximo contraste perceptual (sem cores escuras adjacentes).
-_MES_CORES = [
-    "#e6194b",  # Jan — vermelho vivo
-    "#3cb44b",  # Fev — verde vivo
-    "#ffe119",  # Mar — amarelo
-    "#4363d8",  # Abr — azul royal
-    "#f58231",  # Mai — laranja
-    "#911eb4",  # Jun — roxo
-    "#42d4f4",  # Jul — ciano
-    "#f032e6",  # Ago — magenta
-    "#bfef45",  # Set — verde-limão
-    "#fabed4",  # Out — rosa claro
-    "#469990",  # Nov — teal
-    "#9A6324",  # Dez — marrom
-]
-
 def _monthly_cmap_norm(series: pd.Series, _unused=None):
-    """Colormap qualitativo: cada mês recebe uma cor fixa e distinta."""
-    lo = float(np.percentile(series.dropna(), 2))
-    hi = float(np.percentile(series.dropna(), 98))
-
-    active = [i for i, d in enumerate(MES_DOYS) if lo - 32 <= d <= hi + 32]
-    if not active:
-        active = list(range(12))
-
-    all_bounds = MES_DOYS + [366]
-    boundaries = [all_bounds[active[0]]] + [all_bounds[i + 1] for i in active]
-
-    colors = [_MES_CORES[i] for i in active]
-    cmap = mcolors.ListedColormap(colors, name="monthly_qual")
-    norm = mcolors.BoundaryNorm(boundaries, len(active))
-
-    tick_positions = [(boundaries[i] + boundaries[i + 1]) / 2 for i in range(len(active))]
-    tick_labels = [MESES[active[i]] for i in range(len(active))]
+    """Colormap twilight_shifted contínuo com normalização 1–365 e ticks mensais."""
+    cmap = plt.cm.twilight_shifted
+    norm = mcolors.Normalize(vmin=1, vmax=365)
+    tick_positions = MES_DOYS
+    tick_labels = MESES
     return cmap, norm, tick_positions, tick_labels
 
 
@@ -127,7 +98,7 @@ def plot_single_map(gdf: gpd.GeoDataFrame, doy_col: str, title: str,
                     subtitle: str, brazil: gpd.GeoDataFrame,
                     median_label: str, n_hex: int, r2: float,
                     out_path: Path, base_cmap=None):
-    """Gera mapa com paleta qualitativa mensal — cor fixa e distinta por mês."""
+    """Gera mapa com twilight_shifted cíclico (azul→branco→vermelho→preto)."""
     cmap, norm, tick_pos, tick_labels = _monthly_cmap_norm(gdf[doy_col])
 
     fig = plt.figure(figsize=(9, 10))
@@ -212,7 +183,7 @@ def plot_overview(df: pd.DataFrame, brazil: gpd.GeoDataFrame,
         return
 
     tipo_label = TIPO_LABELS.get(tipo, tipo)
-    cmap = mcolors.ListedColormap(_MES_CORES)
+    cmap = plt.cm.twilight_shifted
     n = len(culturas_com_dados)
     ncols = 3
     nrows = int(np.ceil(n / ncols))
