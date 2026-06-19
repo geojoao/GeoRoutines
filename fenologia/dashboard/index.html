@@ -463,6 +463,12 @@ function doyToMonthStr(doy) {
   return MESES[11];
 }
 
+function doyToDate(year, doy) {
+  const d = new Date(year, 0, 1);
+  d.setDate(d.getDate() + Math.round(doy) - 1);
+  return d.toISOString().slice(0, 10);
+}
+
 // ─────────────────────────────────────────────────────────────
 // Série temporal — ciclos com gaussianas individuais
 // ─────────────────────────────────────────────────────────────
@@ -624,6 +630,56 @@ function renderChart(data) {
       padding: { x: 4, y: 2 },
       borderRadius: 3,
     };
+  });
+
+  // ── Médias fenológicas (repetidas por ano, cores distintas) ──────────────
+  const MEAN_COLORS = { sos: "#00BCD4", pos: "#FF9800", eos: "#E91E63" };
+  const YEARS_MEAN  = [2019, 2020, 2021, 2022, 2023, 2024];
+
+  (data.mean_phenophases || []).forEach((m, mi) => {
+    const isSafra = m.tipo_safra === "safra";
+    YEARS_MEAN.forEach((yr, yi) => {
+      const posYr = (isSafra && m.pos_doy < 180) ? yr + 1 : yr;
+      const eosYr = (isSafra && m.eos_doy < 180) ? yr + 1 : yr;
+      const sfx   = `${mi}_${yr}`;
+      const first  = (yi === 0);
+
+      annotations[`msos_${sfx}`] = {
+        type: "line",
+        xMin: doyToDate(yr, m.sos_doy), xMax: doyToDate(yr, m.sos_doy),
+        borderColor: MEAN_COLORS.sos, borderWidth: 1, borderDash: [8, 4],
+        label: first ? {
+          display: true, content: "~SOS",
+          position: "start", yAdjust: 8,
+          color: MEAN_COLORS.sos, font: { size: 9 },
+          backgroundColor: "rgba(13,17,23,0.8)", padding: { x: 3, y: 1 },
+        } : { display: false },
+      };
+
+      annotations[`mpos_${sfx}`] = {
+        type: "line",
+        xMin: doyToDate(posYr, m.pos_doy), xMax: doyToDate(posYr, m.pos_doy),
+        borderColor: MEAN_COLORS.pos, borderWidth: 1, borderDash: [8, 4],
+        label: first ? {
+          display: true, content: "~POS",
+          position: "center",
+          color: MEAN_COLORS.pos, font: { size: 9 },
+          backgroundColor: "rgba(13,17,23,0.8)", padding: { x: 3, y: 1 },
+        } : { display: false },
+      };
+
+      annotations[`meos_${sfx}`] = {
+        type: "line",
+        xMin: doyToDate(eosYr, m.eos_doy), xMax: doyToDate(eosYr, m.eos_doy),
+        borderColor: MEAN_COLORS.eos, borderWidth: 1, borderDash: [8, 4],
+        label: first ? {
+          display: true, content: "~EOS",
+          position: "end", yAdjust: -8,
+          color: MEAN_COLORS.eos, font: { size: 9 },
+          backgroundColor: "rgba(13,17,23,0.8)", padding: { x: 3, y: 1 },
+        } : { display: false },
+      };
+    });
   });
 
   tsChart = new Chart(ctx, {

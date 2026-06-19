@@ -215,13 +215,29 @@ def api_cycles(hex_id: str, cultura: str):
             "eos": {"date": str(ph["eos"])[:10], "val": round(float(pv["eos_ndvi"]), 4)},
         })
 
+    # Médias fenológicas do hexágono (circular mean de todos os ciclos detectados)
+    mean_rows = _pheno[
+        (_pheno["id_hexagono"] == hex_id) & (_pheno["cultura"] == cultura)
+    ]
+    mean_phenophases = [
+        {
+            "tipo_safra": str(r["tipo_safra"]),
+            "sos_doy":   round(float(r["sos_doy"]), 1),
+            "pos_doy":   round(float(r["pos_doy"]), 1),
+            "eos_doy":   round(float(r["eos_doy"]), 1),
+            "n_ciclos":  int(r["n_ciclos"]),
+        }
+        for _, r in mean_rows.iterrows()
+    ]
+
     out = {
-        "hex_id":  hex_id,
-        "cultura": cultura,
-        "dates":   dates_str,
-        "evi":     [round(float(v), 4) for v in ndvi_arr],
-        "smooth":  [round(float(v), 4) for v in ndvi_smooth],
-        "cycles":  cycles_out,
+        "hex_id":           hex_id,
+        "cultura":          cultura,
+        "dates":            dates_str,
+        "evi":              [round(float(v), 4) for v in ndvi_arr],
+        "smooth":           [round(float(v), 4) for v in ndvi_smooth],
+        "cycles":           cycles_out,
+        "mean_phenophases": mean_phenophases,
     }
     _cycles_cache[cache_key] = out
     return JSONResponse(out)
