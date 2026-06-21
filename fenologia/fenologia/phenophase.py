@@ -90,23 +90,21 @@ def detect_trough_peaks(ndvi_values: np.ndarray, dates: np.ndarray,
     
     # Converte distância em dias para índices
     total_days = (dates[-1] - dates[0]) / np.timedelta64(1, 'D')
-    min_distance_idx = max(1, int((min_distance_days * 0.4) * len(ndvi_values) / total_days))  # REDUZIDO para detectar ciclos curtos
-    
+    min_distance_idx = max(1, int(min_distance_days * len(ndvi_values) / total_days))
+
     # Inverte a série para usar find_peaks
     ndvi_inverted = -ndvi_values
-    
+
     # Calcula estatísticas
     ndvi_std = np.std(ndvi_values)
     ndvi_min = np.min(ndvi_values)
     ndvi_max = np.max(ndvi_values)
     ndvi_mean = np.mean(ndvi_values)
     ndvi_range = ndvi_max - ndvi_min
-    
-    # ESTRATÉGIA MELHORADA: Múltiplos níveis de detecção para capturar safra/safrinha
-    
-    # Nível 1: Detecção muito sensível (vales profundos e superficiais)
-    prominence_very_low = max(0.008, ndvi_std * 0.08)  # MUITO sensível para pegar tudo
-    distance_very_loose = max(1, int(min_distance_idx * 0.4))  # Permite vales próximos
+
+    # Detecção de vales com prominência mínima realista (evita pegar ruído de alta frequência)
+    prominence_very_low = max(0.015, ndvi_std * 0.20)
+    distance_very_loose = max(1, int(min_distance_idx * 0.6))  # Até 40% mais curto que o mínimo
     
     all_troughs, all_props = find_peaks(ndvi_inverted, distance=distance_very_loose, 
                                         prominence=prominence_very_low)
@@ -168,17 +166,16 @@ def detect_trough_peaks(ndvi_values: np.ndarray, dates: np.ndarray,
     # Ordena por score para priorizar vales reais
     vales_classificados.sort(key=lambda x: (-x[1], x[2]))  # Maior score, menor NDVI
     
-    # Reduz para número razoável se houver muitos candidatos
-    # Permite mais ciclos para detectar safra/safrinha
-    max_vales = max(3, int(total_days / 120))  # 1 vale a cada ~120 dias (permite 2 safras por ano)
+    # Reduz para número razoável — ~2 ciclos/ano → 1 vale/ano em média
+    max_vales = max(3, int(total_days / 180))
     vales_filtrados = [v[0] for v in vales_classificados[:max_vales]]
     
     if len(vales_filtrados) > 0:
         # Ordena temporalmente
         vales_filtrados = np.array(sorted(vales_filtrados))
         
-        # Remove vales duplicados/muito próximos (< 40 dias)
-        min_trough_dist_strong = max(1, int(40 * len(ndvi_values) / total_days))
+        # Remove vales duplicados/muito próximos (< 60 dias)
+        min_trough_dist_strong = max(1, int(60 * len(ndvi_values) / total_days))
         final_vales = []
         for v in vales_filtrados:
             if len(final_vales) == 0 or v - final_vales[-1] >= min_trough_dist_strong:
@@ -226,10 +223,8 @@ def segment_cycles(ndvi_values: np.ndarray, dates: np.ndarray, troughs: np.ndarr
     # Garante que troughs está ordenado e remove duplicatas
     troughs = np.unique(troughs)
     
-    # Filtra vales muito próximos (remove ruído), MAS PERMITE DISTÂNCIAS MENORES para safra/safrinha
     total_days = (dates[-1] - dates[0]) / np.timedelta64(1, 'D')
-    # Reduzido de 60 dias para 35 dias para permitir safra/safrinha (ciclos curtos)
-    min_trough_distance = max(1, int(35 * len(ndvi_values) / total_days))
+    min_trough_distance = max(1, int(55 * len(ndvi_values) / total_days))
     
     filtered_troughs = []
     for trough in troughs:
@@ -275,7 +270,7 @@ def segment_cycles(ndvi_values: np.ndarray, dates: np.ndarray, troughs: np.ndarr
         # MUDANÇA IMPORTANTE: Reduzido threshold mínimo de ciclo
         # Antes: respeitava min_cycle_length_days
         # Agora: aceita ciclos com até 25 dias (típico de safrinha)
-        min_cycle_short = min_cycle_length_days * 0.55  # Permite ciclos 45% mais curtos
+        min_cycle_short = min_cycle_length_days * 0.80
         
         if cycle_length_days >= min_cycle_short:
             cycles.append({
@@ -529,8 +524,8 @@ def extract_phenometrics(df_ts: pd.DataFrame, ndvi_column: str = 'NDVI_mean',
     ndvi_smooth = adaptive_smoothing(ndvi_values, dates, method=smoothing_method)
     
     # Etapa 2: Detecção de vales (mínimos locais)
-    troughs = detect_trough_peaks(ndvi_smooth, dates, method='adaptive', 
-                                 min_distance_days=int(min_cycle_length_days * 0.7),
+    troughs = detect_trough_peaks(ndvi_smooth, dates, method='adaptive',
+                                 min_distance_days=int(min_cycle_length_days * 0.85),
                                  quantile_threshold=quantile_trough)
     
     # Etapa 3: Segmentação de ciclos
@@ -538,24 +533,10 @@ def extract_phenometrics(df_ts: pd.DataFrame, ndvi_column: str = 'NDVI_mean',
                            min_cycle_length_days=min_cycle_length_days)
     
     # Etapa 4: Fit de gaussiana em cada ciclo
-    # MUDANÇA: Usa quality threshold adaptativo baseado no comprimento do ciclo
     fitted_cycles = []
     for cycle in cycles:
-        # Para ciclos curtos (safrinha), permite R² um pouco mais baixo
-        # Ciclo curto (< 100 dias): R² mín = 0.50
-        # Ciclo médio (100-150 dias): R² mín = 0.55
-        # Ciclo longo (> 150 dias): R² mín = 0.60
-        
-        cycle_length = cycle['length_days']
-        if cycle_length < 100:
-            adjusted_threshold = min(quality_threshold, 0.50)
-        elif cycle_length < 150:
-            adjusted_threshold = min(quality_threshold, 0.55)
-        else:
-            adjusted_threshold = quality_threshold
-        
-        result = fit_gaussian_to_cycle(ndvi_values, dates, cycle, 
-                                      quality_threshold=adjusted_threshold)
+        result = fit_gaussian_to_cycle(ndvi_values, dates, cycle,
+                                      quality_threshold=quality_threshold)
         fitted_cycles.append(result)
     
     # Extrai estatísticas
