@@ -54,6 +54,24 @@ MIN_CYCLE_DAYS = {
     "segunda_safra_outras_temporarias": 90,
 }
 
+# Limite superior de duração por cultura (literatura agronômica brasileira).
+# Ciclos gaussianos além desse limite são descartados como ruído de outras
+# culturas ou artefatos de suavização temporal.
+MAX_CYCLE_DAYS = {
+    "soja": 160,                          # MG4–MG9+: 90–155 dias; acima = ruído
+    "cana": 420,                          # ratoon anual ~360 dias; 1ª safra até 18 meses
+    "arroz": 160,                         # irrigado/sequeiro: 85–130 dias
+    "algodao": 220,                       # Cerrado/MT: 150–185 dias
+    "cafe": 400,                          # perene, ciclo bianual EVI
+    "citrus": 400,                        # perene, sazonalidade suave
+    "dende": 400,                         # perene, produção contínua
+    "outras_lavouras_temporarias": 200,   # feijão/girassol/trigo: ≤ 150 dias
+    "outras_lavouras_perenes": 400,       # perenes diversas
+    "segunda_safra": 150,                 # milho/sorgo safrinha: 90–120 dias
+    "segunda_safra_algodao": 220,         # similar ao algodão principal
+    "segunda_safra_outras_temporarias": 180,  # culturas diversas curtas
+}
+
 MIN_EVI_AMPLITUDE = 0.08
 MIN_R2_PER_CYCLE = 0.85  # descarta ciclos com ajuste gaussiano ruim
 
@@ -98,10 +116,12 @@ def _worker(args):
     if not result["success"]:
         return []
 
+    max_days = MAX_CYCLE_DAYS.get(cultura, 400)
     successful = [
         c for c in result["cycles"]
         if c.get("fit_success")
         and c["cycle_length_days"] >= min_days
+        and c["cycle_length_days"] <= max_days
         and c["gaussian_params"]["amplitude"] >= MIN_EVI_AMPLITUDE
         and c["r_squared"] >= MIN_R2_PER_CYCLE
     ]

@@ -41,6 +41,14 @@ MIN_CYCLE_DAYS = {
     "segunda_safra_outras_temporarias": 90,
 }
 
+MAX_CYCLE_DAYS = {
+    "soja": 160, "cana": 420, "arroz": 160, "algodao": 220,
+    "cafe": 400, "citrus": 400, "dende": 400,
+    "outras_lavouras_temporarias": 200, "outras_lavouras_perenes": 400,
+    "segunda_safra": 150, "segunda_safra_algodao": 220,
+    "segunda_safra_outras_temporarias": 180,
+}
+
 app = FastAPI(title="Fenologia Brasil")
 
 _pheno: Optional[pd.DataFrame] = None
@@ -157,6 +165,7 @@ def api_cycles(hex_id: str, cultura: str):
         raise HTTPException(422, "Série temporal muito curta para detecção de ciclos")
 
     min_days = MIN_CYCLE_DAYS.get(cultura, 90)
+    max_days = MAX_CYCLE_DAYS.get(cultura, 400)
 
     # DataFrame no formato esperado pelo phenophase
     ts_df = df.rename(columns={"data": "datetime", col: "NDVI_mean"}).copy()
@@ -176,10 +185,12 @@ def api_cycles(hex_id: str, cultura: str):
 
     dates_str = [str(d)[:10] for d in df["data"]]
 
-    # Serializa ciclos bem-sucedidos
+    # Serializa ciclos bem-sucedidos dentro dos limites de duração
     cycles_out = []
     for c in result.get("cycles", []):
         if not c.get("fit_success"):
+            continue
+        if not (min_days <= c["cycle_length_days"] <= max_days):
             continue
         gp = c["gaussian_params"]
         ph = c["phenophase_dates"]
