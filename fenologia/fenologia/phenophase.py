@@ -342,15 +342,15 @@ def detect_vegetation_peaks(
     ndvi_std = np.std(ndvi_values)
     ndvi_mean = np.mean(ndvi_values)
 
-    # Proeminência mínima adaptativa: pico deve se destacar pelo menos 35% do
-    # desvio padrão da série — ignora flutuações de curta duração.
-    prominence_min = max(0.05, ndvi_std * 0.35)
+    # Proeminência mínima adaptativa: pico deve se destacar pelo menos 25%
+    # do desvio padrão da série.  Piso baixo (0.03) para não sufocar culturas
+    # perenes (café, citrus, dendê) que têm EVI de baixa variabilidade.
+    prominence_min = max(0.03, ndvi_std * 0.25)
 
     peaks, _ = find_peaks(
         ndvi_values,
         distance=min_distance_idx,
         prominence=prominence_min,
-        height=ndvi_mean,   # picos devem estar acima da média da série
     )
 
     if len(peaks) == 0:
