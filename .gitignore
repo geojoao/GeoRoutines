@@ -8,3 +8,5 @@ fenologia/data/output/evi_brazil.parquet
 __pycache__/
 *.pyc
 *.pyo
+# Diagnostic plots (dev tool output)
+fenologia/data/output/diag/

@@ -74,10 +74,17 @@ MAX_CYCLE_DAYS = {
 
 MIN_EVI_AMPLITUDE = 0.08
 MIN_R2_PER_CYCLE = 0.85  # descarta ciclos com ajuste gaussiano ruim
+MIN_GROWING_DAYS = 35    # largura mínima do pico (SOS->EOS); rejeita spikes degenerados
 
 PARTS_DIR = Path("data/output/_parts")
 OUTPUT = Path("data/output/fenologia_brasil.parquet")
 N_WORKERS = 14
+
+
+def _growing_days(cycle: dict) -> float:
+    """Largura do pico (duração da safra) = EOS - SOS da gaussiana, em dias."""
+    pd_ = cycle["phenophase_days"]
+    return pd_["eos_days"] - pd_["sos_days"]
 
 
 def circular_mean_doy(doys):
@@ -116,12 +123,16 @@ def _worker(args):
     if not result["success"]:
         return []
 
+    # A duração agronômica do ciclo é a LARGURA DO PICO gaussiano (SOS->EOS),
+    # NÃO o intervalo vale-a-vale do segmento (que é artefato da posição dos
+    # mínimos e tende ao ano inteiro em culturas anuais). Filtrar e reportar
+    # pela largura do pico evita descartar picos válidos só porque os vales que
+    # os cercam estão longe.
     max_days = MAX_CYCLE_DAYS.get(cultura, 400)
     successful = [
         c for c in result["cycles"]
         if c.get("fit_success")
-        and c["cycle_length_days"] >= min_days
-        and c["cycle_length_days"] <= max_days
+        and MIN_GROWING_DAYS <= _growing_days(c) <= max_days
         and c["gaussian_params"]["amplitude"] >= MIN_EVI_AMPLITUDE
         and c["r_squared"] >= MIN_R2_PER_CYCLE
     ]
@@ -143,7 +154,7 @@ def _worker(args):
         pos_doys = [c["phenophase_dates"]["pos"].day_of_year for c in cycles]
         eos_doys = [c["phenophase_dates"]["eos"].day_of_year for c in cycles]
         r2s = [c["r_squared"] for c in cycles]
-        lengths = [c["cycle_length_days"] for c in cycles]
+        lengths = [_growing_days(c) for c in cycles]
 
         records.append({
             "id_hexagono": hex_id,

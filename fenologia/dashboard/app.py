@@ -49,6 +49,8 @@ MAX_CYCLE_DAYS = {
     "segunda_safra_outras_temporarias": 180,
 }
 
+MIN_GROWING_DAYS = 35  # largura mínima do pico (SOS->EOS); rejeita spikes degenerados
+
 app = FastAPI(title="Fenologia Brasil")
 
 _pheno: Optional[pd.DataFrame] = None
@@ -190,7 +192,10 @@ def api_cycles(hex_id: str, cultura: str):
     for c in result.get("cycles", []):
         if not c.get("fit_success"):
             continue
-        if not (min_days <= c["cycle_length_days"] <= max_days):
+        # Filtra pela LARGURA DO PICO (SOS->EOS), não pelo intervalo vale-a-vale
+        # do segmento — ver extract_phenology.py para a justificativa.
+        growing = c["phenophase_days"]["eos_days"] - c["phenophase_days"]["sos_days"]
+        if not (MIN_GROWING_DAYS <= growing <= max_days):
             continue
         gp = c["gaussian_params"]
         ph = c["phenophase_dates"]
