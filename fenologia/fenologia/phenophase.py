@@ -159,23 +159,25 @@ def detect_trough_peaks(ndvi_values: np.ndarray, dates: np.ndarray,
             if abs(derivative_before) > ndvi_std * 0.15 or abs(derivative_after) > ndvi_std * 0.15:
                 score += 1
         
-        # Guarda vales com score >= 2 ou que são obviamente baixos
-        if score >= 2 or trough_value < threshold_minimo_local:
+        # Score >= 3: exige que o vale seja profundo OU profundo + mínimo local.
+        # Rejeita dips intra-ciclo que só são mínimos locais rasos (score=2 por
+        # critério 2 apenas) — esses fragmentam peaks gaussianos reais.
+        if score >= 3:
             vales_classificados.append((trough_idx, score, trough_value))
     
     # Ordena por score para priorizar vales reais
     vales_classificados.sort(key=lambda x: (-x[1], x[2]))  # Maior score, menor NDVI
     
-    # Reduz para número razoável — ~2 ciclos/ano → 1 vale/ano em média
-    max_vales = max(3, int(total_days / 180))
+    # Vincula ao tipo de cultura: max ~2 troughs por comprimento mínimo de ciclo
+    max_vales = max(2, int(total_days / (min_distance_days * 2.0)))
     vales_filtrados = [v[0] for v in vales_classificados[:max_vales]]
     
     if len(vales_filtrados) > 0:
         # Ordena temporalmente
         vales_filtrados = np.array(sorted(vales_filtrados))
         
-        # Remove vales duplicados/muito próximos (< 60 dias)
-        min_trough_dist_strong = max(1, int(60 * len(ndvi_values) / total_days))
+        # Remove vales duplicados/muito próximos (< 75 dias)
+        min_trough_dist_strong = max(1, int(75 * len(ndvi_values) / total_days))
         final_vales = []
         for v in vales_filtrados:
             if len(final_vales) == 0 or v - final_vales[-1] >= min_trough_dist_strong:
@@ -224,7 +226,7 @@ def segment_cycles(ndvi_values: np.ndarray, dates: np.ndarray, troughs: np.ndarr
     troughs = np.unique(troughs)
     
     total_days = (dates[-1] - dates[0]) / np.timedelta64(1, 'D')
-    min_trough_distance = max(1, int(55 * len(ndvi_values) / total_days))
+    min_trough_distance = max(1, int(65 * len(ndvi_values) / total_days))
     
     filtered_troughs = []
     for trough in troughs:
