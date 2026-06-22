@@ -313,6 +313,96 @@ def segment_cycles(ndvi_values: np.ndarray, dates: np.ndarray, troughs: np.ndarr
     return cycles
 
 
+def detect_vegetation_peaks(
+    ndvi_values: np.ndarray,
+    dates: np.ndarray,
+    min_distance_days: int = 90,
+) -> np.ndarray:
+    """
+    Detecta picos vegetativos (máximos locais) diretamente na série EVI.
+
+    Não depende de vales nem de sazonalidade: procura máximos locais acima
+    da média da série, com proeminência mínima adaptativa e distância mínima
+    entre picos configurável por cultura.
+
+    Args:
+        ndvi_values: Array de valores EVI (suavizado recomendado).
+        dates: Array de datas (numpy datetime64).
+        min_distance_days: Distância mínima entre picos em dias.
+
+    Returns:
+        Array de índices dos picos, ordenados temporalmente.
+    """
+    if len(ndvi_values) < 5:
+        return np.array([int(np.argmax(ndvi_values))])
+
+    total_days = float((dates[-1] - dates[0]) / np.timedelta64(1, 'D'))
+    min_distance_idx = max(1, int(min_distance_days * len(ndvi_values) / total_days))
+
+    ndvi_std = np.std(ndvi_values)
+    ndvi_mean = np.mean(ndvi_values)
+
+    # Proeminência mínima adaptativa: pico deve se destacar pelo menos 35% do
+    # desvio padrão da série — ignora flutuações de curta duração.
+    prominence_min = max(0.05, ndvi_std * 0.35)
+
+    peaks, _ = find_peaks(
+        ndvi_values,
+        distance=min_distance_idx,
+        prominence=prominence_min,
+        height=ndvi_mean,   # picos devem estar acima da média da série
+    )
+
+    if len(peaks) == 0:
+        return np.array([int(np.argmax(ndvi_values))])
+
+    return peaks
+
+
+def segment_around_peaks(
+    ndvi_values: np.ndarray,
+    dates: np.ndarray,
+    peaks: np.ndarray,
+) -> List[Dict[str, Any]]:
+    """
+    Define janelas de ciclo ao redor de cada pico vegetativo.
+
+    A janela de cada ciclo vai do ponto médio entre picos consecutivos
+    (ou borda da série) até o próximo ponto médio, garantindo que cada
+    pico fique aproximadamente no centro da sua janela.
+
+    Args:
+        ndvi_values: Array completo de valores EVI.
+        dates: Array completo de datas.
+        peaks: Índices dos picos (saída de detect_vegetation_peaks).
+
+    Returns:
+        Lista de dicionários de ciclo compatíveis com fit_gaussian_to_cycle.
+    """
+    cycles = []
+    n = len(ndvi_values)
+
+    for i, peak_idx in enumerate(peaks):
+        left = 0 if i == 0 else int((int(peaks[i - 1]) + peak_idx) // 2)
+        right = n - 1 if i == len(peaks) - 1 else int((peak_idx + int(peaks[i + 1])) // 2)
+
+        length_days = float((dates[right] - dates[left]) / np.timedelta64(1, 'D'))
+
+        cycles.append({
+            'cycle_num': i + 1,
+            'start_idx': int(left),
+            'end_idx': int(right),
+            'peak_idx': int(peak_idx),
+            'start_date': pd.Timestamp(dates[left]),
+            'end_date': pd.Timestamp(dates[right]),
+            'length_days': length_days,
+            'min_ndvi': float(np.min(ndvi_values[left:right + 1])),
+            'max_ndvi': float(ndvi_values[peak_idx]),
+        })
+
+    return cycles
+
+
 def gaussian(x: np.ndarray, amplitude: float, mean: float, std: float, offset: float) -> np.ndarray:
     """
     Modelo gaussiano para ajuste de dados fenológicos.
@@ -368,15 +458,24 @@ def fit_gaussian_to_cycle(ndvi_values: np.ndarray, dates: np.ndarray, cycle: Dic
     # Parâmetros iniciais para o ajuste
     amplitude_init = np.max(ndvi_cycle) - np.min(ndvi_cycle)
     mean_init = days_since_start[np.argmax(ndvi_cycle)]
-    std_init = (days_since_start[-1] - days_since_start[0]) / 4
     offset_init = np.min(ndvi_cycle)
-    
+
+    # std_init via FWHM observado: mais robusto que 1/4 da janela quando a
+    # janela é muito mais larga que o pico (ex.: ciclo anual em janela de 365d).
+    half_amp_thresh = offset_init + amplitude_init * 0.5
+    above_half = ndvi_cycle >= half_amp_thresh
+    if above_half.sum() >= 2:
+        fwhm = days_since_start[above_half][-1] - days_since_start[above_half][0]
+        std_init = max(5.0, fwhm / 2.355)   # FWHM = 2.355 * sigma
+    else:
+        std_init = max(5.0, (days_since_start[-1] - days_since_start[0]) / 6.0)
+
+    window_len = days_since_start[-1] - days_since_start[0]
     initial_guess = [amplitude_init, mean_init, std_init, offset_init]
-    
+
     # Define limites para o ajuste
-    lower_bounds = [0.01, days_since_start[0], 5, -0.5]
-    upper_bounds = [1.0, days_since_start[-1], (days_since_start[-1] - days_since_start[0]) / 1.5, 
-                   np.max(ndvi_cycle)]
+    lower_bounds = [0.01, days_since_start[0], 5.0, -0.5]
+    upper_bounds = [1.0, days_since_start[-1], window_len / 3.0, np.max(ndvi_cycle)]
     
     try:
         # Ajusta a gaussiana
@@ -524,27 +623,27 @@ def extract_phenometrics(df_ts: pd.DataFrame, ndvi_column: str = 'NDVI_mean',
     
     # Etapa 1: Suavização adaptativa
     ndvi_smooth = adaptive_smoothing(ndvi_values, dates, method=smoothing_method)
-    
-    # Etapa 2: Detecção de vales (mínimos locais)
-    troughs = detect_trough_peaks(ndvi_smooth, dates, method='adaptive',
-                                 min_distance_days=int(min_cycle_length_days * 0.85),
-                                 quantile_threshold=quantile_trough)
-    
-    # Etapa 3: Segmentação de ciclos
-    cycles = segment_cycles(ndvi_values, dates, troughs, 
-                           min_cycle_length_days=min_cycle_length_days)
-    
-    # Etapa 4: Fit de gaussiana em cada ciclo
+
+    # Etapa 2: Detecção direta de picos vegetativos (não depende de vales)
+    peaks = detect_vegetation_peaks(
+        ndvi_smooth, dates,
+        min_distance_days=min_cycle_length_days,
+    )
+
+    # Etapa 3: Define janelas ao redor de cada pico
+    cycles = segment_around_peaks(ndvi_values, dates, peaks)
+
+    # Etapa 4: Fit de gaussiana em cada janela
     fitted_cycles = []
     for cycle in cycles:
         result = fit_gaussian_to_cycle(ndvi_values, dates, cycle,
                                       quality_threshold=quality_threshold)
         fitted_cycles.append(result)
-    
+
     # Extrai estatísticas
     successful_cycles = [c for c in fitted_cycles if c.get('fit_success', False)]
     failed_cycles = [c for c in fitted_cycles if not c.get('fit_success', False)]
-    
+
     if successful_cycles:
         mean_r_squared = np.mean([c['r_squared'] for c in successful_cycles])
         mean_cycle_length = np.mean([c['cycle_length_days'] for c in successful_cycles])
@@ -553,7 +652,7 @@ def extract_phenometrics(df_ts: pd.DataFrame, ndvi_column: str = 'NDVI_mean',
         mean_r_squared = 0.0
         mean_cycle_length = 0.0
         mean_rmse = 0.0
-    
+
     return {
         'success': True,
         'num_cycles_detected': len(cycles),
@@ -570,8 +669,8 @@ def extract_phenometrics(df_ts: pd.DataFrame, ndvi_column: str = 'NDVI_mean',
             'ndvi_max': float(np.max(ndvi_values)),
             'ndvi_mean': float(np.mean(ndvi_values)),
             'ndvi_std': float(np.std(ndvi_values)),
-            'num_troughs': len(troughs),
-            'troughs_indices': troughs.tolist() if len(troughs) > 0 else [],
+            'num_peaks': len(peaks),
+            'peak_indices': peaks.tolist(),
         }
     }
 
@@ -606,7 +705,7 @@ def print_phenometrics_summary(phenometrics: Dict) -> None:
     print(f"   Máximo: {diag['ndvi_max']:.4f}")
     print(f"   Média: {diag['ndvi_mean']:.4f}")
     print(f"   Desvio padrão: {diag['ndvi_std']:.4f}")
-    print(f"   Vales detectados: {diag['num_troughs']}")
+    print(f"   Picos detectados: {diag.get('num_peaks', diag.get('num_troughs', 0))}")
     
     print("\n" + "-"*80)
     print("DETALHES DE CADA CICLO:")
@@ -655,10 +754,10 @@ def plot_diagnostic(df_ts: pd.DataFrame, phenometrics: Dict, ndvi_column: str = 
     ax.plot(dates, ndvi_smooth, 'b-', linewidth=2, label='NDVI Suavizado')
     
     # Marca vales detectados
-    troughs = phenometrics['diagnostics']['troughs_indices']
-    if len(troughs) > 0:
-        ax.scatter(dates[troughs], ndvi_values[troughs], color='red', s=100, 
-                  marker='v', label='Vales Detectados', zorder=5)
+    peaks_idx = phenometrics['diagnostics'].get('peak_indices', phenometrics['diagnostics'].get('troughs_indices', []))
+    if len(peaks_idx) > 0:
+        ax.scatter(dates[peaks_idx], ndvi_values[peaks_idx], color='green', s=100,
+                  marker='^', label='Picos Detectados', zorder=5)
     
     ax.set_ylabel('NDVI', fontsize=11)
     ax.set_title(f'{title} - NDVI Original vs Suavizado', fontsize=13, fontweight='bold')

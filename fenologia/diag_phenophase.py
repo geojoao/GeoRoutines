@@ -64,9 +64,9 @@ def plot_hex(ax, hex_id, ts_df, cultura):
     ax.plot(dt, ndvi, color="0.6", lw=0.8, alpha=0.6, label="EVI bruto")
     ax.plot(dt, smooth, color="#1f77b4", lw=1.8, label="EVI suave")
 
-    troughs = res["diagnostics"]["troughs_indices"]
-    if troughs:
-        ax.scatter(dt[troughs], ndvi[troughs], marker="v", color="red", s=40, zorder=5, label="vales")
+    peaks = res["diagnostics"].get("peak_indices", res["diagnostics"].get("troughs_indices", []))
+    if peaks:
+        ax.scatter(dt[peaks], ndvi[peaks], marker="^", color="green", s=40, zorder=5, label="picos")
 
     n_ok = 0
     palette = plt.cm.tab10(np.linspace(0, 1, 10))
