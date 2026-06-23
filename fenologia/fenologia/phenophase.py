@@ -643,105 +643,74 @@ fit_gaussian_to_cycle = fit_curve_to_cycle  # alias de compatibilidade
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Extrapolação por shape-matching (k-NN sobre curvas logísticas normalizadas)
+# Extrapolação de pico em andamento — método de prior de descida
 # ─────────────────────────────────────────────────────────────────────────────
 
-_N_NORM = 100  # resolução da curva normalizada
+
+def _bank_quality_ok(c: Dict, min_r2: float = 0.70) -> bool:
+    """Filtra ciclos lixo do banco de priors."""
+    if not c.get('fit_success'): return False
+    if c.get('at_series_end') or c.get('at_series_start'): return False
+    if c.get('r_squared', 0) < min_r2: return False
+    cp  = c['curve_params']
+    amp = float(cp.get('amplitude', 0))
+    k2  = float(cp.get('k2', 0))
+    k1  = float(cp.get('k1', 0))
+    m1_ = float(cp.get('m1', 0))
+    m2_ = float(cp.get('m2', 0))
+    if not (0.05 < amp < 1.1):   return False
+    if not (0.005 < k2  < 0.5):  return False
+    if not (0.005 < k1  < 0.5):  return False
+    if m2_ <= m1_:               return False
+    pd_   = c.get('phenophase_days', {})
+    p_d   = float(pd_.get('pos_days', 0))
+    dur   = float(c.get('cycle_length_days', 0))
+    if p_d <= 5 or p_d >= dur - 5: return False
+    return True
 
 
-def _cycle_normalized_curve(cycle_fit: Dict, n: int = _N_NORM) -> Optional[np.ndarray]:
-    """
-    Curva logística dupla de um ciclo completo, normalizada para τ ∈ [0,1] e
-    amplitude ∈ [0,1].  Retorna None se o ciclo for inválido.
-    """
-    if not cycle_fit.get('fit_success'):
-        return None
-    cp  = cycle_fit['curve_params']
-    dur = float(cycle_fit['cycle_length_days'])
-    if dur < 30:
-        return None
-    t    = np.linspace(0.0, dur, n)
-    y    = double_logistic(t, cp['amplitude'], cp['m1'], cp['k1'],
-                           cp['m2'], cp['k2'], cp['offset'])
-    span = float(y.max() - y.min())
-    if span < 1e-4:
-        return None
-    return (y - y.min()) / span
-
-
-def _select_db_cycles(
-    db_curves: List[Dict],
-    distances: np.ndarray,
-    target_season_type: Optional[str] = None,
-    min_keep: int = 2,
-    iqr_factor: float = 1.5,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Seleciona ciclos do banco filtrando por season_type e removendo outliers.
-
-    Lógica:
-    1. Filtra por season_type (somente se restar >= min_keep ciclos)
-    2. Remove outliers pela cerca IQR superior: threshold = Q3 + iqr_factor * IQR
-    3. Se sobrar < min_keep após o corte, cancela o corte
-    4. Calcula pesos = 1/dist
-
-    Returns:
-        (indices, distances, weights) como np.ndarray
-    """
-    n       = len(db_curves)
-    sel_idx = np.arange(n)
-
-    # 1. Filtro por season_type
-    if target_season_type:
-        same = np.array([db_curves[i].get('season_type') == target_season_type
-                         for i in range(n)])
-        if same.sum() >= min_keep:
-            sel_idx = sel_idx[same]
-
-    # 2. Remoção de outliers por IQR
-    sub_d = distances[sel_idx]
-    q1, q3 = np.percentile(sub_d, [25, 75])
-    upper  = q3 + iqr_factor * (q3 - q1)
-    inlier = sub_d <= upper
-    if inlier.sum() >= min_keep:
-        sel_idx = sel_idx[inlier]
-
-    # 3. Pesos inverso-distância
-    sel_d = distances[sel_idx]
-    eps   = 1e-6
-    raw_w = 1.0 / (sel_d + eps)
-    return sel_idx, sel_d, raw_w / raw_w.sum()
+def _build_bank(fitted_cycles: List[Dict],
+                target_season: Optional[str],
+                min_r2: float,
+                min_bank: int) -> Optional[List[Dict]]:
+    """Retorna banco de ciclos de qualidade, preferindo mesmo season_type."""
+    all_ok = [c for c in fitted_cycles if _bank_quality_ok(c, min_r2)]
+    same   = [c for c in all_ok if c.get('season_type') == target_season] if target_season else []
+    bank   = same if len(same) >= 2 else all_ok
+    return bank if len(bank) >= min_bank else None
 
 
 def extrapolate_terminal_cycle(
     ndvi_smooth: np.ndarray,
     dates: np.ndarray,
     fitted_cycles: List[Dict],
-    iqr_factor: float = 1.5,
-    min_keep: int = 2,
-    n_pts: int = _N_NORM,
+    min_bank: int = 1,
+    min_r2_bank: float = 0.70,
 ) -> Dict[str, Any]:
     """
-    Extrapola o ciclo vegetativo em andamento no final da série usando
-    shape-matching sobre curvas logísticas normalizadas dos ciclos históricos.
+    Extrapola o pico vegetativo em andamento no final da série usando prior
+    de descida calculado dos ciclos históricos completos do mesmo hexágono.
 
-    Selecção dos ciclos de referência:
-      1. Filtra por season_type do ciclo terminal (se disponível)
-      2. Remove outliers por IQR (critério Tukey)
-      3. Usa TODOS os ciclos restantes ponderados por 1/distância L²
+    Método:
+      1. Localiza o ciclo terminal (at_series_end=True, fit_success=True).
+      2. Constrói banco de ciclos de qualidade (filtro físico + R²).
+      3. Calcula priors: median(k2) e median(m2 - pos_days) do banco.
+      4. Reconstrói a logística completa: parâmetros da ascensão do fit +
+         priors para k2 e m2 da descida.
+      5. Determina EOS_forecast onde a curva cai a 20 % da amplitude.
+      6. Gera banda de incerteza (±1 std de half_right).
 
     Args:
-        ndvi_smooth   : EVI suavizado (mesma dimensão de dates)
-        dates         : array np.datetime64
-        fitted_cycles : lista de cycles de extract_phenometrics['cycles']
-        iqr_factor    : fator IQR para corte de outliers (padrão=1.5)
-        min_keep      : mínimo de ciclos no banco após filtros
-        n_pts         : resolução da curva normalizada
+        ndvi_smooth   : EVI suavizado (aceito para compatibilidade, não usado no cálculo)
+        dates         : array np.datetime64 — usado apenas para series_end_date
+        fitted_cycles : lista de cycles de extract_phenometrics()
+        min_bank      : mínimo de ciclos válidos no banco (padrão 1)
+        min_r2_bank   : R² mínimo para aceitar um ciclo no banco (padrão 0.70)
 
     Returns:
-        dict — ver campo 'success'.  Se False, inclui 'reason'.
+        dict com 'success'.  Se False, inclui 'reason'.
     """
-    # ── 1. Localiza ciclo terminal ───────────────────────────────────────────
+    # ── 1. Ciclo terminal ────────────────────────────────────────────────────
     terminal = None
     for c in reversed(fitted_cycles):
         at_end = (c.get('at_series_end', False) if c.get('fit_success')
@@ -752,284 +721,211 @@ def extrapolate_terminal_cycle(
 
     if terminal is None:
         return {'success': False, 'reason': 'Nenhum ciclo em andamento ao final da série'}
+    if not terminal.get('fit_success'):
+        return {'success': False, 'reason': 'Ciclo terminal sem fit logístico válido'}
 
-    if terminal.get('fit_success'):
-        t_start   = np.datetime64(terminal['cycle_start'])
-        start_idx = int(np.searchsorted(dates, t_start))
-        term_season = terminal.get('season_type')
-    else:
-        start_idx   = terminal['cycle']['start_idx']
-        term_season = terminal.get('cycle', {}).get('season_type')
-    end_idx = len(dates) - 1
+    cp         = terminal['curve_params']
+    t0         = pd.Timestamp(terminal['cycle_start'])
+    series_end = pd.Timestamp(dates[-1])
+    obs_days   = float((series_end - t0).total_seconds() / 86400)
 
-    obs_evi   = ndvi_smooth[start_idx:end_idx + 1].astype(float)
-    obs_dates = dates[start_idx:end_idx + 1]
-    if len(obs_evi) < 3:
-        return {'success': False, 'reason': 'Dados observados insuficientes (< 3 pts)'}
+    amplitude = float(cp['amplitude'])
+    offset    = float(cp['offset'])
+    m1        = float(cp['m1'])
+    k1        = float(cp['k1'])
+    pos_days  = float(terminal['phenophase_days']['pos_days'])
+    term_season = terminal.get('season_type')
 
-    # ── 2. Banco de ciclos completos (sem bordas) ─────────────────────────────
-    db_complete = [c for c in fitted_cycles
-                   if c.get('fit_success')
-                   and not c.get('at_series_end', False)
-                   and not c.get('at_series_start', False)]
+    peak_was_observed = (pos_days <= obs_days)
 
-    db_curves: List[Dict] = []
-    for c in db_complete:
-        y_norm = _cycle_normalized_curve(c, n_pts)
-        if y_norm is None:
-            continue
-        cp = c['curve_params']
-        db_curves.append({
-            'cycle_num':   c['cycle_num'],
-            'season_type': c.get('season_type'),
-            'dur_days':    float(c['cycle_length_days']),
-            'amplitude':   float(cp['amplitude']),
-            'offset':      float(cp['offset']),
-            'y_norm':      y_norm,
-        })
+    # ── 2. Banco de priors ───────────────────────────────────────────────────
+    bank = _build_bank(fitted_cycles, term_season, min_r2_bank, min_bank)
+    if bank is None:
+        return {'success': False,
+                'reason': 'Banco insuficiente — poucos ciclos de qualidade no histórico'}
 
-    if not db_curves:
-        return {'success': False, 'reason': 'Sem ciclos completos para comparação'}
+    k2_vals     = [float(c['curve_params']['k2']) for c in bank]
+    half_r_vals = [float(c['curve_params']['m2']) - float(c['phenophase_days']['pos_days'])
+                   for c in bank]
+    prior_k2         = float(np.median(k2_vals))
+    prior_k2_std     = float(np.std(k2_vals))
+    prior_half_r     = float(np.median(half_r_vals))
+    prior_half_r_std = float(np.std(half_r_vals))
 
-    # ── 3. Normaliza o trecho observado ──────────────────────────────────────
-    obs_min  = float(obs_evi.min())
-    obs_max  = float(obs_evi.max())
-    obs_span = obs_max - obs_min
-    if obs_span < 1e-4:
-        return {'success': False, 'reason': 'Amplitude observada insuficiente'}
-    obs_norm = (obs_evi - obs_min) / obs_span
+    # ── 3. Caso pico não observado: prior para POS e amplitude ──────────────
+    forecast_pos_date: Optional[pd.Timestamp] = None
+    if not peak_was_observed:
+        pos_off_vals = [float(c['phenophase_days']['pos_days']) - float(c['curve_params']['m1'])
+                        for c in bank]
+        amp_vals     = [float(c['curve_params']['amplitude']) for c in bank]
+        pos_days  = m1 + float(np.median(pos_off_vals))
+        amplitude = float(np.median(amp_vals))
+        forecast_pos_date = t0 + pd.Timedelta(days=pos_days)
 
-    # τ_obs: fração do ciclo já observada (estimada pela duração mediana do banco)
-    med_dur  = float(np.median([d['dur_days'] for d in db_curves]))
-    obs_dur  = float((obs_dates[-1] - obs_dates[0]) / np.timedelta64(1, 'D'))
-    tau_obs  = float(np.clip(obs_dur / med_dur, 0.05, 0.95))
-    m_obs    = max(3, min(n_pts - 2, int(round(tau_obs * n_pts))))
+    # ── 4. Reconstrução logística com prior de descida ───────────────────────
+    m2_est    = pos_days + prior_half_r
+    m2_est_lo = pos_days + max(prior_half_r - prior_half_r_std, 1.0)
+    m2_est_hi = pos_days + prior_half_r + prior_half_r_std
+    k2_lo     = min(prior_k2 + prior_k2_std, 0.5)
+    k2_hi     = max(prior_k2 - prior_k2_std, 0.005)
 
-    t_src = np.linspace(0.0, 1.0, len(obs_norm))
-    t_dst = np.linspace(0.0, 1.0, m_obs)
-    obs_resampled = np.interp(t_dst, t_src, obs_norm)
+    eos_threshold = offset + 0.20 * amplitude
+    t_max   = m2_est + 4.0 / prior_k2 + 30.0
+    t_dense = np.linspace(0.0, t_max, max(int(t_max) + 1, 200))
 
-    # ── 4. Distâncias L² → seleção por season_type + IQR ─────────────────────
-    all_dists = np.array([
-        float(np.sqrt(np.mean((obs_resampled - d['y_norm'][:m_obs]) ** 2)))
-        for d in db_curves
-    ])
-    sel_idx, sel_dists, weights = _select_db_cycles(
-        db_curves, all_dists, term_season, min_keep, iqr_factor
-    )
-    n_removed = len(db_curves) - len(sel_idx)
+    y_central = double_logistic(t_dense, amplitude, m1, k1, m2_est,    prior_k2, offset)
+    y_upper   = double_logistic(t_dense, amplitude, m1, k1, m2_est_hi, k2_hi,    offset)
+    y_lower   = double_logistic(t_dense, amplitude, m1, k1, m2_est_lo, k2_lo,    offset)
 
-    # ── 5. Cauda ponderada (normalizada) e banda de incerteza ────────────────
-    tail_len  = n_pts - m_obs
-    tail_norm = np.zeros(tail_len)
-    tail_stack: List[np.ndarray] = []
-    for w, i in zip(weights, sel_idx):
-        t = db_curves[i]['y_norm'][m_obs:m_obs + tail_len]
-        if len(t) < tail_len:
-            t = np.pad(t, (0, tail_len - len(t)), mode='edge')
-        tail_norm  += w * t
-        tail_stack.append(t)
-    tail_std = np.std(tail_stack, axis=0) if len(tail_stack) > 1 else np.zeros(tail_len)
-
-    # ── 6. Amplitude estimada e escala de volta para EVI ─────────────────────
-    w_amp = float(sum(w * db_curves[i]['amplitude'] for w, i in zip(weights, sel_idx)))
-    if obs_span >= 0.80 * w_amp:
-        scale = obs_span
-        base  = obs_min
-    else:
-        scale = w_amp
-        base  = obs_min
-
-    tail_evi = base + scale * tail_norm
-
-    # Continuidade: desloca tail para que tail[0] ≈ obs_evi[-1]
-    if tail_len > 0:
-        gap = float(obs_evi[-1]) - float(tail_evi[0])
-        tail_evi = tail_evi + gap * np.linspace(1.0, 0.0, tail_len)
-
-    # ── 7. Datas da cauda ─────────────────────────────────────────────────────
-    w_dur          = float(sum(w * db_curves[i]['dur_days'] for w, i in zip(weights, sel_idx)))
-    remaining_days = max((1.0 - tau_obs) * w_dur, 1.0)
-    tail_offsets   = np.linspace(0.0, remaining_days, tail_len)
-    series_end     = pd.Timestamp(obs_dates[-1])
-    tail_dates     = [series_end + pd.Timedelta(days=float(d)) for d in tail_offsets]
-
-    # ── 8. EOS: curva cai abaixo do limiar de 25 % da amplitude ──────────────
-    eos_thr      = base + 0.25 * scale
-    forecast_eos = tail_dates[-1]
-    for dt, v in zip(tail_dates, tail_evi):
-        if v <= eos_thr:
-            forecast_eos = dt
+    # ── 5. EOS forecast ──────────────────────────────────────────────────────
+    forecast_eos: pd.Timestamp = t0 + pd.Timedelta(days=float(t_dense[-1]))
+    for ti, yi in zip(t_dense, y_central):
+        if ti > obs_days and yi <= eos_threshold:
+            forecast_eos = t0 + pd.Timedelta(days=float(ti))
             break
 
-    uncertainty = float(np.std([db_curves[i]['dur_days'] for i in sel_idx])) if len(sel_idx) > 1 else 0.0
-
-    full_dates  = list(pd.to_datetime(obs_dates)) + tail_dates
-    full_vals   = list(obs_evi) + list(tail_evi)
-    full_std    = [0.0] * len(obs_evi) + list(tail_std * scale)
-    is_forecast = [False] * len(obs_evi) + [True] * tail_len
+    # ── 6. Output ─────────────────────────────────────────────────────────────
+    dates_out   = [t0 + pd.Timedelta(days=float(ti)) for ti in t_dense]
+    is_forecast = [bool(ti > obs_days) for ti in t_dense]
 
     return {
-        'success':              True,
-        'method':               'shape_matching_knn',
-        'tau_obs':              round(tau_obs, 3),
-        'season_type_filter':   term_season,
-        'n_database_cycles':    len(db_curves),
-        'n_cycles_used':        int(len(sel_idx)),
-        'n_outliers_removed':   int(n_removed),
-        'matched_cycles': [
+        'success':            True,
+        'method':             'descent_prior',
+        'n_prior_cycles':     len(bank),
+        'season_type_filter': term_season,
+        'prior': {
+            'k2_median':         round(prior_k2, 4),
+            'k2_std':            round(prior_k2_std, 4),
+            'half_right_median': round(prior_half_r, 1),
+            'half_right_std':    round(prior_half_r_std, 1),
+        },
+        'peak_was_observed':  peak_was_observed,
+        'forecast_pos_date':  forecast_pos_date,
+        'series_end_date':    series_end,
+        'forecast_eos_date':  forecast_eos,
+        'uncertainty_days':   round(prior_half_r_std, 1),
+        'prior_cycles': [
             {
-                'cycle_num':   db_curves[i]['cycle_num'],
-                'season_type': db_curves[i]['season_type'],
-                'distance':    round(float(all_dists[i]), 4),
-                'weight':      round(float(weights[j]), 4),
-                'dur_days':    round(db_curves[i]['dur_days'], 1),
+                'cycle_num':   c['cycle_num'],
+                'season_type': c.get('season_type'),
+                'k2':          round(float(c['curve_params']['k2']), 4),
+                'half_right':  round(
+                    float(c['curve_params']['m2']) - float(c['phenophase_days']['pos_days']), 1),
             }
-            for j, i in enumerate(sel_idx)
+            for c in bank
         ],
-        'series_end_date':   series_end,
-        'forecast_eos_date': forecast_eos,
-        'uncertainty_days':  round(uncertainty, 1),
         'curve': {
-            'dates':       [str(d)[:10] for d in full_dates],
-            'values':      [round(float(v), 4) for v in full_vals],
-            'std':         [round(float(v), 4) for v in full_std],
-            'is_forecast': is_forecast,
+            'dates':        [str(d)[:10] for d in dates_out],
+            'values':       [round(float(v), 4) for v in y_central],
+            'values_upper': [round(float(v), 4) for v in y_upper],
+            'values_lower': [round(float(v), 4) for v in y_lower],
+            'is_forecast':  is_forecast,
         },
     }
 
 
 def validate_extrapolation(
     fitted_cycles: List[Dict],
-    truncation_fracs: Optional[List[float]] = None,
-    iqr_factor: float = 1.5,
-    min_keep: int = 2,
-    n_pts: int = _N_NORM,
+    delta_pos_days: Optional[List[int]] = None,
+    min_r2_bank: float = 0.70,
 ) -> Dict[str, Any]:
     """
-    Validação leave-one-out da extrapolação por shape-matching.
+    Validação leave-one-out do método de prior de descida.
 
-    Para cada ciclo completo `j`, usa os demais como banco (filtrado por
-    season_type e com remoção de outliers IQR) e testa a predição do flanco
-    descendente em diferentes frações de truncação (0.25, 0.50, 0.75).
+    Para cada ciclo completo j, simula truncação em POS + delta_pos dias e
+    aplica o prior calculado dos demais ciclos.  Compara EOS previsto vs. real.
+
+    Args:
+        fitted_cycles  : lista de cycles de extract_phenometrics()
+        delta_pos_days : lista de deslocamentos em dias após POS (padrão [10, 30])
+        min_r2_bank    : R² mínimo para aceitar ciclo no banco
 
     Returns:
-        dict com 'success' e 'results' (lista por ciclo × por truncação).
+        dict com 'success' e 'results' (por ciclo × por truncação).
     """
-    if truncation_fracs is None:
-        truncation_fracs = [0.25, 0.50, 0.75]
+    if delta_pos_days is None:
+        delta_pos_days = [10, 30]
 
-    complete = [c for c in fitted_cycles
-                if c.get('fit_success')
-                and not c.get('at_series_end', False)
-                and not c.get('at_series_start', False)]
-
+    complete = [c for c in fitted_cycles if _bank_quality_ok(c, min_r2_bank)]
     if len(complete) < 2:
-        return {'success': False, 'reason': 'Mínimo de 2 ciclos completos para validação'}
-
-    def _eos_days(arr, m_obs_local, n_pts_local, dur_ref, tau_obs, w_dur_matched):
-        """Tempo absoluto (dias) do EOS estimado."""
-        tl = n_pts_local - m_obs_local
-        for ii, v in enumerate(arr):
-            if v <= 0.25:
-                t_abs = tau_obs * dur_ref + (ii / max(tl, 1)) * (1 - tau_obs) * w_dur_matched
-                return t_abs
-        return None
+        return {'success': False, 'reason': 'Mínimo de 2 ciclos de qualidade para validação'}
 
     results = []
     for j_target, target in enumerate(complete):
-        y_full = _cycle_normalized_curve(target, n_pts)
-        if y_full is None:
+        eos_true_days = float(target['phenophase_days']['eos_days'])
+        pos_true_days = float(target['phenophase_days']['pos_days'])
+        target_stype  = target.get('season_type')
+        cp_t          = target['curve_params']
+
+        bank_others = [c for i, c in enumerate(complete) if i != j_target]
+        bank = [c for c in bank_others if c.get('season_type') == target_stype] if target_stype else []
+        if len(bank) < 2:
+            bank = bank_others
+        if not bank:
             continue
 
-        dur_target   = float(target['cycle_length_days'])
-        target_stype = target.get('season_type')
+        k2_vals     = [float(c['curve_params']['k2'])  for c in bank]
+        half_r_vals = [float(c['curve_params']['m2']) - float(c['phenophase_days']['pos_days'])
+                       for c in bank]
+        prior_k2         = float(np.median(k2_vals))
+        prior_half_r     = float(np.median(half_r_vals))
+        prior_half_r_std = float(np.std(half_r_vals))
 
-        # banco: todos exceto j_target, já com season_type e amplitude
-        others_raw = [c for i, c in enumerate(complete) if i != j_target]
-        db_local: List[Dict] = []
-        for c in others_raw:
-            y = _cycle_normalized_curve(c, n_pts)
-            if y is None:
-                continue
-            cp = c['curve_params']
-            db_local.append({
-                'cycle_num':   c['cycle_num'],
-                'season_type': c.get('season_type'),
-                'dur_days':    float(c['cycle_length_days']),
-                'amplitude':   float(cp['amplitude']),
-                'y_norm':      y,
-            })
+        amplitude = float(cp_t['amplitude'])
+        offset    = float(cp_t['offset'])
+        m1        = float(cp_t['m1'])
+        k1        = float(cp_t['k1'])
+        m2_est    = pos_true_days + prior_half_r
+        m2_lo     = pos_true_days + max(prior_half_r - prior_half_r_std, 1.0)
+        m2_hi     = pos_true_days + prior_half_r + prior_half_r_std
+        k2_lo     = min(prior_k2 + float(np.std(k2_vals)), 0.5)
+        k2_hi     = max(prior_k2 - float(np.std(k2_vals)), 0.005)
 
-        if not db_local:
-            continue
+        eos_threshold = offset + 0.20 * amplitude
+        t_max   = m2_est + 4.0 / prior_k2 + 30.0
+        t_dense = np.linspace(0.0, t_max, max(int(t_max) + 1, 200))
+        y_central = double_logistic(t_dense, amplitude, m1, k1, m2_est, prior_k2, offset)
+        y_upper   = double_logistic(t_dense, amplitude, m1, k1, m2_hi,  k2_hi,    offset)
+        y_lower   = double_logistic(t_dense, amplitude, m1, k1, m2_lo,  k2_lo,    offset)
 
         cycle_res = {
-            'cycle_num':   target['cycle_num'],
-            'dur_days':    round(dur_target, 1),
-            'season_type': target_stype or '?',
-            'y_full_norm': y_full,
+            'cycle_num':      target['cycle_num'],
+            'season_type':    target_stype or '?',
+            'dur_days':       round(float(target['cycle_length_days']), 1),
+            'eos_true_days':  round(eos_true_days, 1),
+            'n_bank':         len(bank),
+            'prior_k2':       round(prior_k2, 4),
+            'prior_half_r':   round(prior_half_r, 1),
+            'prior_half_r_std': round(prior_half_r_std, 1),
+            't_dense':        t_dense,
+            'y_true':         double_logistic(t_dense, amplitude, m1, k1,
+                                             float(cp_t['m2']), float(cp_t['k2']), offset),
+            'y_central':      y_central,
+            'y_upper':        y_upper,
+            'y_lower':        y_lower,
             'truncations': [],
         }
 
-        for tau in truncation_fracs:
-            m_obs    = max(3, min(n_pts - 2, int(round(tau * n_pts))))
-            prefix_q = y_full[:m_obs]
-            tail_len = n_pts - m_obs
+        for delta in delta_pos_days:
+            obs_days_sim = pos_true_days + float(delta)
 
-            all_dists = np.array([
-                float(np.sqrt(np.mean((prefix_q - d['y_norm'][:m_obs]) ** 2)))
-                for d in db_local
-            ])
-            sel_idx, sel_dists, weights = _select_db_cycles(
-                db_local, all_dists, target_stype, min_keep, iqr_factor
-            )
-            n_used    = int(len(sel_idx))
-            n_removed = len(db_local) - n_used
-
-            tail_pred  = np.zeros(tail_len)
-            tail_stack = []
-            for w, i in zip(weights, sel_idx):
-                t = db_local[i]['y_norm'][m_obs:m_obs + tail_len]
-                if len(t) < tail_len:
-                    t = np.pad(t, (0, tail_len - len(t)), mode='edge')
-                tail_pred  += w * t
-                tail_stack.append(t)
-            tail_std = np.std(tail_stack, axis=0) if len(tail_stack) > 1 else np.zeros(tail_len)
-
-            actual_tail = y_full[m_obs:]
-            mae = float(np.mean(np.abs(tail_pred - actual_tail)))
-
-            # EOS em dias a partir do início do ciclo
-            eos_actual_days = _eos_days(actual_tail, m_obs, n_pts, dur_target, tau, dur_target)
-            w_dur = float(sum(w * db_local[i]['dur_days'] for w, i in zip(weights, sel_idx)))
-            eos_pred_days   = _eos_days(tail_pred,   m_obs, n_pts, dur_target, tau, w_dur)
-            eos_err = abs(eos_pred_days - eos_actual_days) if (eos_pred_days and eos_actual_days) else None
+            eos_pred_days = float(t_dense[-1])
+            for ti, yi in zip(t_dense, y_central):
+                if ti > obs_days_sim and yi <= eos_threshold:
+                    eos_pred_days = float(ti)
+                    break
 
             cycle_res['truncations'].append({
-                'tau':             tau,
-                'm_obs':           m_obs,
-                'pred_tail':       tail_pred,
-                'pred_std':        tail_std,
-                'actual_tail':     actual_tail,
-                'n_used':          n_used,
-                'n_outliers_removed': n_removed,
-                'matched': [
-                    {
-                        'cycle_num':   db_local[i]['cycle_num'],
-                        'season_type': db_local[i]['season_type'],
-                        'dist':        round(float(all_dists[i]), 4),
-                        'weight':      round(float(weights[j]), 4),
-                    }
-                    for j, i in enumerate(sel_idx)
-                ],
-                'mae':              round(mae, 4),
-                'eos_error_days':   round(eos_err, 1) if eos_err is not None else None,
+                'trunc_label':    f'POS+{delta}d',
+                'obs_days':       round(obs_days_sim, 1),
+                'eos_pred_days':  round(eos_pred_days, 1),
+                'eos_error_days': round(eos_pred_days - eos_true_days, 1),
             })
 
         results.append(cycle_res)
 
     return {'success': True, 'n_cycles': len(results), 'results': results}
+
 
 
 def extract_phenometrics(df_ts: pd.DataFrame, ndvi_column: str = 'NDVI_mean',
