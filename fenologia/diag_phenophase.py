@@ -17,7 +17,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 sys.path.insert(0, str(Path(__file__).parent))
-from fenologia.phenophase import extract_phenometrics, adaptive_smoothing, asymmetric_gaussian
+from fenologia.phenophase import extract_phenometrics, adaptive_smoothing, double_logistic
 
 MIN_CYCLE_DAYS = {
     "soja": 120, "cana": 150, "arroz": 100, "algodao": 110, "cafe": 120,
@@ -83,8 +83,7 @@ def plot_hex(ax, hex_id, ts_df, cultura):
         cs = pd.Timestamp(c["cycle_start"]); ce = pd.Timestamp(c["cycle_end"])
         gp = c["gaussian_params"]
         xs = np.linspace(0, L, 80)
-        ys = asymmetric_gaussian(xs, gp["amplitude"], gp["mean_days"],
-                                 gp["std_left_days"], gp["std_right_days"], gp["offset"])
+        ys = double_logistic(xs, gp["amplitude"], gp["m1"], gp["k1"], gp["m2"], gp["k2"], gp["offset"])
         gdt = [cs + pd.Timedelta(days=float(x)) for x in xs]
         style = "-" if kept else ":"
         ax.plot(gdt, ys, style, color=color, lw=2 if kept else 1, alpha=0.9 if kept else 0.5)

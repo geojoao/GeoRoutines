@@ -129,12 +129,19 @@ def _worker(args):
     # pela largura do pico evita descartar picos válidos só porque os vales que
     # os cercam estão longe.
     max_days = MAX_CYCLE_DAYS.get(cultura, 400)
+    # Ciclos de borda (truncados no início/fim da série) admitem R² menor:
+    # o flanco ausente reduz o ajuste mesmo com pico agronomicamente real.
+    _BOUNDARY_R2_FACTOR = 0.80   # 0.80 * 0.80 = 0.64
+    def _min_r2(c):
+        boundary = c.get("at_series_start") or c.get("at_series_end")
+        return MIN_R2_PER_CYCLE * (_BOUNDARY_R2_FACTOR if boundary else 1.0)
+
     successful = [
         c for c in result["cycles"]
         if c.get("fit_success")
         and MIN_GROWING_DAYS <= _growing_days(c) <= max_days
         and c["gaussian_params"]["amplitude"] >= MIN_EVI_AMPLITUDE
-        and c["r_squared"] >= MIN_R2_PER_CYCLE
+        and c["r_squared"] >= _min_r2(c)
     ]
 
     if not successful:

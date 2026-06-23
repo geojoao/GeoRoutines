@@ -155,7 +155,7 @@ def api_cycles(hex_id: str, cultura: str):
     if cache_key in _cycles_cache:
         return JSONResponse(_cycles_cache[cache_key])
 
-    from fenologia.phenophase import extract_phenometrics, adaptive_smoothing, asymmetric_gaussian
+    from fenologia.phenophase import extract_phenometrics, adaptive_smoothing, double_logistic
 
     col = f"evi_medio_{cultura}"
     if hex_id not in _ts.index:
@@ -200,7 +200,9 @@ def api_cycles(hex_id: str, cultura: str):
         r2 = c["r_squared"]
         if not (MIN_GROWING_DAYS <= growing <= max_days):
             continue
-        if amp < MIN_EVI_AMPLITUDE or r2 < MIN_R2_PER_CYCLE:
+        boundary = c.get('at_series_start') or c.get('at_series_end')
+        min_r2_eff = MIN_R2_PER_CYCLE * (0.80 if boundary else 1.0)  # 0.64 nas bordas
+        if amp < MIN_EVI_AMPLITUDE or r2 < min_r2_eff:
             continue
         gp = c["gaussian_params"]
         ph = c["phenophase_dates"]
@@ -216,11 +218,9 @@ def api_cycles(hex_id: str, cultura: str):
             if t > ce:
                 break
             x = (t - cs).total_seconds() / 86400
-            y = float(asymmetric_gaussian(
+            y = float(double_logistic(
                 np.array([x]),
-                gp["amplitude"], gp["mean_days"],
-                gp["std_left_days"], gp["std_right_days"],
-                gp["offset"]
+                gp["amplitude"], gp["m1"], gp["k1"], gp["m2"], gp["k2"], gp["offset"]
             )[0])
             gauss_dates.append(str(t)[:10])
             gauss_vals.append(round(y, 4))

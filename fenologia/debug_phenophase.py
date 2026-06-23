@@ -24,7 +24,7 @@ from fenologia.phenophase import (
     detect_vegetation_peaks,
     segment_around_peaks,
     fit_gaussian_to_cycle,
-    asymmetric_gaussian,
+    double_logistic,
 )
 
 # Thresholds de produção (extract_phenology.py)
@@ -290,8 +290,7 @@ def plot_diagnostic(diag: dict, titulo: str, output_path: Path):
             [(d - dates_cyc[0]) / np.timedelta64(1, "D") for d in dates_cyc], dtype=float
         )
         p = fit["gaussian_params"]
-        gauss_vals = asymmetric_gaussian(days_from_start, p["amplitude"], p["mean_days"],
-                                        p["std_left_days"], p["std_right_days"], p["offset"])
+        gauss_vals = double_logistic(days_from_start, p["amplitude"], p["m1"], p["k1"], p["m2"], p["k2"], p["offset"])
         label_g = (f"Ciclo {cyc_diag['cycle_num']} "
                    f"R²={fit['r_squared']:.3f} | "
                    f"amp={p['amplitude']:.3f} | "
