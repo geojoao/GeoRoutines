@@ -4,7 +4,7 @@ Versão melhorada com melhor detecção de ciclos (safra e safrinha) usando:
 1. Suavização adaptativa da série temporal
 2. Detecção robuста de mínimos locais (solo exposto)
 3. Segmentação de ciclos independentes
-4. Fit de gaussiana em cada ciclo
+4. Ajuste de logística dupla em cada ciclo
 """
 
 import numpy as np
@@ -377,7 +377,7 @@ def segment_around_peaks(
         peaks: Índices dos picos (saída de detect_vegetation_peaks).
 
     Returns:
-        Lista de dicionários de ciclo compatíveis com fit_gaussian_to_cycle.
+        Lista de dicionários de ciclo compatíveis com fit_curve_to_cycle.
     """
     cycles = []
     n = len(ndvi_values)
@@ -491,19 +491,19 @@ def classify_season_type(pos_date: pd.Timestamp) -> str:
     return 'safrinha'
 
 
-def fit_gaussian_to_cycle(ndvi_values: np.ndarray, dates: np.ndarray, cycle: Dict[str, Any],
-                         quality_threshold: float = 0.6) -> Dict[str, Any]:
+def fit_curve_to_cycle(ndvi_values: np.ndarray, dates: np.ndarray, cycle: Dict[str, Any],
+                       quality_threshold: float = 0.6) -> Dict[str, Any]:
     """
-    Ajusta uma gaussiana a um ciclo específico e extrai parâmetros fenológicos.
-    
+    Ajusta uma logística dupla a um ciclo específico e extrai parâmetros fenológicos.
+
     Args:
         ndvi_values: Array completo de valores NDVI
         dates: Array completo de datas
         cycle: Dicionário do ciclo
         quality_threshold: Threshold mínimo de R² para considerar fit bem-sucedido
-    
+
     Returns:
-        Dicionário com parâmetros da gaussiana e estágios fenológicos
+        Dicionário com parâmetros da logística dupla e estágios fenológicos
     """
     start_idx = cycle['start_idx']
     end_idx = cycle['end_idx']
@@ -610,15 +610,14 @@ def fit_gaussian_to_cycle(ndvi_values: np.ndarray, dates: np.ndarray, cycle: Dic
             'season_type': classify_season_type(pos_date),
             'r_squared': r_squared,
             'rmse': float(np.sqrt(np.mean(residuals ** 2))),
-            'gaussian_params': {  # chave mantida para compatibilidade
-                'amplitude':     float(amplitude),
-                'offset':        float(offset),
-                'mean_days':     pos_days,       # POS em dias (compat.)
-                'm1':            float(m1),      # inflexão de subida
-                'k1':            float(k1),      # taxa de subida (day⁻¹)
-                'm2':            float(m2),      # inflexão de descida
-                'k2':            float(k2),      # taxa de descida (day⁻¹)
-                # campos de compat. com código que usa campos antigos
+            'curve_params': {
+                'amplitude':      float(amplitude),
+                'offset':         float(offset),
+                'mean_days':      pos_days,       # POS em dias
+                'm1':             float(m1),      # inflexão de subida
+                'k1':             float(k1),      # taxa de subida (day⁻¹)
+                'm2':             float(m2),      # inflexão de descida
+                'k2':             float(k2),      # taxa de descida (day⁻¹)
                 'std_left_days':  abs(pos_days - m1),
                 'std_right_days': abs(m2 - pos_days),
                 'std_dev_days':   abs(m2 - m1) / 4.0,
@@ -638,6 +637,9 @@ def fit_gaussian_to_cycle(ndvi_values: np.ndarray, dates: np.ndarray, cycle: Dic
 
     except Exception as e:
         return {'fit_success': False, 'reason': f'Erro na otimização: {str(e)}', 'cycle': cycle}
+
+
+fit_gaussian_to_cycle = fit_curve_to_cycle  # alias de compatibilidade
 
 
 def extract_phenometrics(df_ts: pd.DataFrame, ndvi_column: str = 'NDVI_mean',
@@ -707,11 +709,11 @@ def extract_phenometrics(df_ts: pd.DataFrame, ndvi_column: str = 'NDVI_mean',
     # Etapa 3: Define janelas ao redor de cada pico
     cycles = segment_around_peaks(ndvi_values, dates, peaks)
 
-    # Etapa 4: Fit de gaussiana em cada janela
+    # Etapa 4: Ajuste de logística dupla em cada janela
     fitted_cycles = []
     for cycle in cycles:
-        result = fit_gaussian_to_cycle(ndvi_values, dates, cycle,
-                                      quality_threshold=quality_threshold)
+        result = fit_curve_to_cycle(ndvi_values, dates, cycle,
+                                    quality_threshold=quality_threshold)
         fitted_cycles.append(result)
 
     # Extrai estatísticas
@@ -874,28 +876,26 @@ def plot_diagnostic(df_ts: pd.DataFrame, phenometrics: Dict, ndvi_column: str = 
     ax.legend(['NDVI Original'] + [f'Ciclo {c["cycle_num"]}' for c in phenometrics['cycles'] 
                                    if c['fit_success']], loc='upper right')
     
-    # Gráfico 3: Fit de gaussiana
+    # Gráfico 3: Ajuste de logística dupla
     ax = axes[2]
     ax.plot(dates, ndvi_values, 'k-', linewidth=1.5, label='NDVI Original', zorder=1)
-    
+
     for i, cycle in enumerate(phenometrics['cycles']):
         if cycle['fit_success']:
             color = colors[i % len(colors)]
-            
-            # Reconstrói a gaussiana
+
             cycle_start_date = cycle['cycle_start']
             cycle_end_date = cycle['cycle_end']
-            
-            # Cria série de dias para plotar gaussiana
+
             cycle_dates_mask = (dates >= cycle_start_date) & (dates <= cycle_end_date)
             cycle_dates = dates[cycle_dates_mask]
-            
+
             if len(cycle_dates) > 0:
-                days_since_start = np.array([(d - cycle_dates[0]) / np.timedelta64(1, 'D') 
+                days_since_start = np.array([(d - cycle_dates[0]) / np.timedelta64(1, 'D')
                                             for d in cycle_dates], dtype=float)
-                
-                params = cycle['gaussian_params']
-                gaussian_vals = double_logistic(
+
+                params = cycle['curve_params']
+                curve_vals = double_logistic(
                     days_since_start,
                     params['amplitude'],
                     params['m1'],
@@ -903,13 +903,13 @@ def plot_diagnostic(df_ts: pd.DataFrame, phenometrics: Dict, ndvi_column: str = 
                     params['m2'],
                     params['k2'],
                     params['offset'])
-                
-                ax.plot(cycle_dates, gaussian_vals, '--', linewidth=2.5, 
+
+                ax.plot(cycle_dates, curve_vals, '--', linewidth=2.5,
                        color=color, label=f'Ciclo {cycle["cycle_num"]} (R²={cycle["r_squared"]:.3f})')
-    
+
     ax.set_xlabel('Data', fontsize=11)
     ax.set_ylabel('NDVI', fontsize=11)
-    ax.set_title('Ajustes Gaussianos por Ciclo', fontsize=13, fontweight='bold')
+    ax.set_title('Ajustes Logísticos por Ciclo', fontsize=13, fontweight='bold')
     ax.grid(True, alpha=0.3)
     ax.legend(loc='upper right', fontsize=9)
     

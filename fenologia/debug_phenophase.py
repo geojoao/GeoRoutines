@@ -23,7 +23,7 @@ from fenologia.phenophase import (
     adaptive_smoothing,
     detect_vegetation_peaks,
     segment_around_peaks,
-    fit_gaussian_to_cycle,
+    fit_curve_to_cycle,
     double_logistic,
 )
 
@@ -125,10 +125,10 @@ def diagnose_hexagono(hex_id: str, dates: np.ndarray, evi: np.ndarray,
             result["falha_em"] = "sem_pico_suficiente_prominence"
         result["detalhes"]["evi_std"] = round(ndvi_std, 4)
     else:
-        # Etapa 3-4: Segmentação + Gaussian fit
+        # Etapa 3-4: Segmentação + ajuste de logística dupla
         cycles = segment_around_peaks(evi_v, dates_v, peaks_raw)
         for cyc in cycles:
-            fit = fit_gaussian_to_cycle(evi_v, dates_v, cyc, quality_threshold=0.6)
+            fit = fit_curve_to_cycle(evi_v, dates_v, cyc, quality_threshold=0.6)
             cyc_diag = {
                 "cycle_num": cyc["cycle_num"],
                 "length_days": round(float(cyc["length_days"]), 1),
@@ -139,7 +139,7 @@ def diagnose_hexagono(hex_id: str, dates: np.ndarray, evi: np.ndarray,
                 "rejeitado_por": [],
             }
             if fit.get("fit_success"):
-                amp = fit["gaussian_params"]["amplitude"]
+                amp = fit["curve_params"]["amplitude"]
                 grow = _growing_days(fit)
                 max_days = MAX_CYCLE_DAYS.get(cultura, 400)
                 cyc_diag["amplitude"] = round(float(amp), 4)
@@ -273,7 +273,7 @@ def plot_diagnostic(diag: dict, titulo: str, output_path: Path):
     ax2.set_title("Segmentação em Ciclos — Motivos de Rejeição", fontsize=11, fontweight="bold")
     ax2.grid(True, alpha=0.3)
 
-    # ── Painel 3: Ajuste Gaussiano por ciclo ────────────────────────────────
+    # ── Painel 3: Ajuste Logístico por ciclo ────────────────────────────────
     ax3 = fig.add_subplot(gs[2])
     ax3.plot(dates_v, evi_v, "k-", lw=1.2, alpha=0.5, label="EVI bruto")
 
@@ -289,14 +289,14 @@ def plot_diagnostic(diag: dict, titulo: str, output_path: Path):
         days_from_start = np.array(
             [(d - dates_cyc[0]) / np.timedelta64(1, "D") for d in dates_cyc], dtype=float
         )
-        p = fit["gaussian_params"]
-        gauss_vals = double_logistic(days_from_start, p["amplitude"], p["m1"], p["k1"], p["m2"], p["k2"], p["offset"])
+        p = fit["curve_params"]
+        curve_vals = double_logistic(days_from_start, p["amplitude"], p["m1"], p["k1"], p["m2"], p["k2"], p["offset"])
         label_g = (f"Ciclo {cyc_diag['cycle_num']} "
                    f"R²={fit['r_squared']:.3f} | "
                    f"amp={p['amplitude']:.3f} | "
                    f"grow={_growing_days(fit):.0f}d")
         ls = "-" if not cyc_diag["rejeitado_por"] else "--"
-        ax3.plot(dates_cyc, gauss_vals, ls, lw=2.5, color=color, label=label_g)
+        ax3.plot(dates_cyc, curve_vals, ls, lw=2.5, color=color, label=label_g)
 
         # Marca SOS/POS/EOS
         if "phenophase_dates" in fit:
@@ -309,14 +309,14 @@ def plot_diagnostic(diag: dict, titulo: str, output_path: Path):
         any_fit = True
 
     if not any_fit:
-        ax3.text(0.5, 0.5, "Nenhum ajuste Gaussiano bem-sucedido\n(R² < 0.60 ou fit divergiu)",
+        ax3.text(0.5, 0.5, "Nenhum ajuste logístico bem-sucedido\n(R² < 0.60 ou fit divergiu)",
                  ha="center", va="center", transform=ax3.transAxes,
                  fontsize=13, color="red",
                  bbox=dict(boxstyle="round,pad=0.5", fc="#ffe0e0", alpha=0.9))
 
     ax3.set_xlabel("Data", fontsize=11)
     ax3.set_ylabel("EVI", fontsize=11)
-    ax3.set_title("Ajuste Gaussiano (tracejado = rejeitado pelos filtros de produção)", fontsize=11, fontweight="bold")
+    ax3.set_title("Ajuste Logístico (tracejado = rejeitado pelos filtros de produção)", fontsize=11, fontweight="bold")
     ax3.grid(True, alpha=0.3)
     if any_fit:
         ax3.legend(loc="upper right", fontsize=8)

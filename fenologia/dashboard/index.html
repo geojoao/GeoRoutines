@@ -486,7 +486,7 @@ function doyToDate(year, doy) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Série temporal — ciclos com gaussianas individuais
+// Série temporal — ciclos com logísticas duplas individuais
 // ─────────────────────────────────────────────────────────────
 const CYCLE_PALETTE = [
   "#FF6B35", "#F7931E", "#FFD23F", "#A8E063",
@@ -595,13 +595,13 @@ function renderChart() {
   const annotations = {};
 
   if (tsMode === "ciclos") {
-    // ── Modo ciclos: gaussiana + SOS/POS/EOS por pico vegetativo ──────────
+    // ── Modo ciclos: logística dupla + SOS/POS/EOS por pico vegetativo ──────
     data.cycles.forEach((c, i) => {
       const col = CYCLE_PALETTE[i % CYCLE_PALETTE.length];
 
       datasets.push({
         label: `Ciclo ${c.cycle_num}`,
-        data: c.gauss_dates.map((d, j) => ({ x: d, y: c.gauss_vals[j] })),
+        data: c.curve_dates.map((d, j) => ({ x: d, y: c.curve_vals[j] })),
         borderColor: col,
         backgroundColor: "transparent",
         borderWidth: 2,

@@ -55,10 +55,10 @@ MIN_CYCLE_DAYS = {
 }
 
 # Limite superior de duração por cultura (literatura agronômica brasileira).
-# Ciclos gaussianos além desse limite são descartados como ruído de outras
-# culturas ou artefatos de suavização temporal.
+# Ciclos além desse limite são descartados como ruído de outras culturas
+# ou artefatos de suavização temporal.
 MAX_CYCLE_DAYS = {
-    "soja": 180,                          # MG4–MG9+: 90–155 dias pico; até 180 com gaussiana assimétrica
+    "soja": 180,                          # MG4–MG9+: 90–155 dias pico
     "cana": 420,                          # ratoon anual ~360 dias; 1ª safra até 18 meses
     "arroz": 160,                         # irrigado/sequeiro: 85–130 dias
     "algodao": 220,                       # Cerrado/MT: 150–185 dias
@@ -73,7 +73,7 @@ MAX_CYCLE_DAYS = {
 }
 
 MIN_EVI_AMPLITUDE = 0.08
-MIN_R2_PER_CYCLE = 0.80  # gaussiana assimétrica permite reduzir de 0.85 → 0.80
+MIN_R2_PER_CYCLE = 0.80
 MIN_GROWING_DAYS = 35    # largura mínima do pico (SOS->EOS); rejeita spikes degenerados
 
 PARTS_DIR = Path("data/output/_parts")
@@ -82,7 +82,7 @@ N_WORKERS = 14
 
 
 def _growing_days(cycle: dict) -> float:
-    """Largura do pico (duração da safra) = EOS - SOS da gaussiana, em dias."""
+    """Largura do pico (duração da safra) = EOS - SOS da logística, em dias."""
     pd_ = cycle["phenophase_days"]
     return pd_["eos_days"] - pd_["sos_days"]
 
@@ -123,11 +123,6 @@ def _worker(args):
     if not result["success"]:
         return []
 
-    # A duração agronômica do ciclo é a LARGURA DO PICO gaussiano (SOS->EOS),
-    # NÃO o intervalo vale-a-vale do segmento (que é artefato da posição dos
-    # mínimos e tende ao ano inteiro em culturas anuais). Filtrar e reportar
-    # pela largura do pico evita descartar picos válidos só porque os vales que
-    # os cercam estão longe.
     max_days = MAX_CYCLE_DAYS.get(cultura, 400)
     # Ciclos de borda (truncados no início/fim da série) admitem R² menor:
     # o flanco ausente reduz o ajuste mesmo com pico agronomicamente real.
@@ -140,7 +135,7 @@ def _worker(args):
         c for c in result["cycles"]
         if c.get("fit_success")
         and MIN_GROWING_DAYS <= _growing_days(c) <= max_days
-        and c["gaussian_params"]["amplitude"] >= MIN_EVI_AMPLITUDE
+        and c["curve_params"]["amplitude"] >= MIN_EVI_AMPLITUDE
         and c["r_squared"] >= _min_r2(c)
     ]
 

@@ -149,7 +149,7 @@ def api_cycles(hex_id: str, cultura: str):
     """
     Re-roda extract_phenometrics para o hexágono e retorna:
       - série EVI bruta + suavizada
-      - por ciclo: gaussiana, SOS/POS/EOS efetivos, R²
+      - por ciclo: logística dupla, SOS/POS/EOS efetivos, R²
     """
     cache_key = (hex_id, cultura)
     if cache_key in _cycles_cache:
@@ -196,7 +196,7 @@ def api_cycles(hex_id: str, cultura: str):
             continue
         # Filtra pela LARGURA DO PICO (SOS->EOS), amplitude mínima e R²
         growing = c["phenophase_days"]["eos_days"] - c["phenophase_days"]["sos_days"]
-        amp = c["gaussian_params"]["amplitude"]
+        amp = c["curve_params"]["amplitude"]
         r2 = c["r_squared"]
         if not (MIN_GROWING_DAYS <= growing <= max_days):
             continue
@@ -204,15 +204,15 @@ def api_cycles(hex_id: str, cultura: str):
         min_r2_eff = MIN_R2_PER_CYCLE * (0.80 if boundary else 1.0)  # 0.64 nas bordas
         if amp < MIN_EVI_AMPLITUDE or r2 < min_r2_eff:
             continue
-        gp = c["gaussian_params"]
+        cp = c["curve_params"]
         ph = c["phenophase_dates"]
         pv = c["phenophase_values"]
 
-        # Gera pontos densos da gaussiana assimétrica (a cada 4 dias no intervalo do ciclo)
+        # Gera pontos densos da logística dupla ao longo do ciclo
         cs = pd.Timestamp(c["cycle_start"])
         ce = pd.Timestamp(c["cycle_end"])
         n_pts = max(60, int(c["cycle_length_days"] / 3))
-        gauss_dates, gauss_vals = [], []
+        curve_dates, curve_vals = [], []
         for i in range(n_pts + 1):
             t = cs + pd.Timedelta(days=i * c["cycle_length_days"] / n_pts)
             if t > ce:
@@ -220,10 +220,10 @@ def api_cycles(hex_id: str, cultura: str):
             x = (t - cs).total_seconds() / 86400
             y = float(double_logistic(
                 np.array([x]),
-                gp["amplitude"], gp["m1"], gp["k1"], gp["m2"], gp["k2"], gp["offset"]
+                cp["amplitude"], cp["m1"], cp["k1"], cp["m2"], cp["k2"], cp["offset"]
             )[0])
-            gauss_dates.append(str(t)[:10])
-            gauss_vals.append(round(y, 4))
+            curve_dates.append(str(t)[:10])
+            curve_vals.append(round(y, 4))
 
         cycles_out.append({
             "cycle_num":         c["cycle_num"],
@@ -232,8 +232,8 @@ def api_cycles(hex_id: str, cultura: str):
             "cycle_start":       str(cs)[:10],
             "cycle_end":         str(ce)[:10],
             "cycle_length_days": round(c["cycle_length_days"]),
-            "gauss_dates":       gauss_dates,
-            "gauss_vals":        gauss_vals,
+            "curve_dates":       curve_dates,
+            "curve_vals":        curve_vals,
             "sos": {"date": str(ph["sos"])[:10], "val": round(float(pv["sos_ndvi"]), 4)},
             "pos": {"date": str(ph["pos"])[:10], "val": round(float(pv["pos_ndvi"]), 4)},
             "eos": {"date": str(ph["eos"])[:10], "val": round(float(pv["eos_ndvi"]), 4)},

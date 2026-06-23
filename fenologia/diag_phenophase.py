@@ -1,7 +1,7 @@
 """
 Diagnóstico visual do phenophase: amostra hexágonos, roda extract_phenometrics
 com os MESMOS parâmetros do extract_phenology.py / dashboard, e plota
-EVI bruto + suavizado + troughs + gaussianas por ciclo + SOS/POS/EOS.
+EVI bruto + suavizado + troughs + logísticas duplas por ciclo + SOS/POS/EOS.
 
 Uso: uv run python diag_phenophase.py <cultura> <n_hex> <seed> <out_prefix>
 """
@@ -74,16 +74,16 @@ def plot_hex(ax, hex_id, ts_df, cultura):
         if not c.get("fit_success"):
             continue
         L = c["cycle_length_days"]
-        amp = c["gaussian_params"]["amplitude"]
+        amp = c["curve_params"]["amplitude"]
         r2 = c["r_squared"]
         pdys = c["phenophase_days"]
         growing = pdys["eos_days"] - pdys["sos_days"]
         kept = (MIN_GROWING_DAYS <= growing <= max_days) and amp >= MIN_EVI_AMPLITUDE and r2 >= MIN_R2
         color = palette[n_ok % 10] if kept else "0.5"
         cs = pd.Timestamp(c["cycle_start"]); ce = pd.Timestamp(c["cycle_end"])
-        gp = c["gaussian_params"]
+        cp = c["curve_params"]
         xs = np.linspace(0, L, 80)
-        ys = double_logistic(xs, gp["amplitude"], gp["m1"], gp["k1"], gp["m2"], gp["k2"], gp["offset"])
+        ys = double_logistic(xs, cp["amplitude"], cp["m1"], cp["k1"], cp["m2"], cp["k2"], cp["offset"])
         gdt = [cs + pd.Timedelta(days=float(x)) for x in xs]
         style = "-" if kept else ":"
         ax.plot(gdt, ys, style, color=color, lw=2 if kept else 1, alpha=0.9 if kept else 0.5)
