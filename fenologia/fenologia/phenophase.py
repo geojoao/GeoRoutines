@@ -642,6 +642,344 @@ def fit_curve_to_cycle(ndvi_values: np.ndarray, dates: np.ndarray, cycle: Dict[s
 fit_gaussian_to_cycle = fit_curve_to_cycle  # alias de compatibilidade
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Extrapolação por shape-matching (k-NN sobre curvas logísticas normalizadas)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_N_NORM = 100  # resolução da curva normalizada
+
+
+def _cycle_normalized_curve(cycle_fit: Dict, n: int = _N_NORM) -> Optional[np.ndarray]:
+    """
+    Curva logística dupla de um ciclo completo, normalizada para τ ∈ [0,1] e
+    amplitude ∈ [0,1].  Retorna None se o ciclo for inválido.
+    """
+    if not cycle_fit.get('fit_success'):
+        return None
+    cp  = cycle_fit['curve_params']
+    dur = float(cycle_fit['cycle_length_days'])
+    if dur < 30:
+        return None
+    t    = np.linspace(0.0, dur, n)
+    y    = double_logistic(t, cp['amplitude'], cp['m1'], cp['k1'],
+                           cp['m2'], cp['k2'], cp['offset'])
+    span = float(y.max() - y.min())
+    if span < 1e-4:
+        return None
+    return (y - y.min()) / span
+
+
+def extrapolate_terminal_cycle(
+    ndvi_smooth: np.ndarray,
+    dates: np.ndarray,
+    fitted_cycles: List[Dict],
+    k: int = 3,
+    n_pts: int = _N_NORM,
+) -> Dict[str, Any]:
+    """
+    Extrapola o ciclo vegetativo em andamento no final da série usando k-NN
+    sobre a forma normalizada dos ciclos passados completos do mesmo hexágono.
+
+    Método:
+      1. Encontra o ciclo terminal (at_series_end=True).
+      2. Normaliza o trecho observado para [0,1]×[0,1].
+      3. Compara com os prefixos dos ciclos completos (distância L²).
+      4. Calcula a cauda ponderada pelos k mais próximos.
+      5. Re-escala para unidades EVI e converte para datas absolutas.
+
+    Args:
+        ndvi_smooth   : EVI suavizado (mesma dimensão de dates)
+        dates         : array np.datetime64
+        fitted_cycles : lista de cycles de extract_phenometrics['cycles']
+        k             : número de vizinhos mais próximos
+        n_pts         : resolução da curva normalizada
+
+    Returns:
+        dict — ver campo 'success'.  Se False, inclui 'reason'.
+    """
+    # ── 1. Localiza ciclo terminal ───────────────────────────────────────────
+    terminal = None
+    for c in reversed(fitted_cycles):
+        at_end = (c.get('at_series_end', False) if c.get('fit_success')
+                  else c.get('cycle', {}).get('at_series_end', False))
+        if at_end:
+            terminal = c
+            break
+
+    if terminal is None:
+        return {'success': False, 'reason': 'Nenhum ciclo em andamento ao final da série'}
+
+    if terminal.get('fit_success'):
+        t_start   = np.datetime64(terminal['cycle_start'])
+        start_idx = int(np.searchsorted(dates, t_start))
+    else:
+        start_idx = terminal['cycle']['start_idx']
+    end_idx = len(dates) - 1
+
+    obs_evi   = ndvi_smooth[start_idx:end_idx + 1].astype(float)
+    obs_dates = dates[start_idx:end_idx + 1]
+    if len(obs_evi) < 3:
+        return {'success': False, 'reason': 'Dados observados insuficientes (< 3 pts)'}
+
+    # ── 2. Banco de ciclos completos (sem bordas) ─────────────────────────────
+    db_complete = [c for c in fitted_cycles
+                   if c.get('fit_success')
+                   and not c.get('at_series_end', False)
+                   and not c.get('at_series_start', False)]
+
+    db_curves: List[Dict] = []
+    for c in db_complete:
+        y_norm = _cycle_normalized_curve(c, n_pts)
+        if y_norm is None:
+            continue
+        cp = c['curve_params']
+        db_curves.append({
+            'cycle_num': c['cycle_num'],
+            'dur_days':  float(c['cycle_length_days']),
+            'amplitude': float(cp['amplitude']),
+            'offset':    float(cp['offset']),
+            'y_norm':    y_norm,
+        })
+
+    if not db_curves:
+        return {'success': False, 'reason': 'Sem ciclos completos para comparação'}
+
+    # ── 3. Normaliza o trecho observado ──────────────────────────────────────
+    obs_min  = float(obs_evi.min())
+    obs_max  = float(obs_evi.max())
+    obs_span = obs_max - obs_min
+    if obs_span < 1e-4:
+        return {'success': False, 'reason': 'Amplitude observada insuficiente'}
+    obs_norm = (obs_evi - obs_min) / obs_span
+
+    # τ_obs: fração do ciclo já observada (estimada pela duração mediana do banco)
+    med_dur  = float(np.median([d['dur_days'] for d in db_curves]))
+    obs_dur  = float((obs_dates[-1] - obs_dates[0]) / np.timedelta64(1, 'D'))
+    tau_obs  = float(np.clip(obs_dur / med_dur, 0.05, 0.95))
+    m_obs    = max(3, min(n_pts - 2, int(round(tau_obs * n_pts))))
+
+    t_src = np.linspace(0.0, 1.0, len(obs_norm))
+    t_dst = np.linspace(0.0, 1.0, m_obs)
+    obs_resampled = np.interp(t_dst, t_src, obs_norm)
+
+    # ── 4. Distâncias L² e k vizinhos mais próximos ───────────────────────────
+    distances = []
+    for d in db_curves:
+        prefix = d['y_norm'][:m_obs]
+        distances.append(float(np.sqrt(np.mean((obs_resampled - prefix) ** 2))))
+
+    order  = np.argsort(distances)
+    k_use  = min(k, len(db_curves))
+    top_k  = list(order[:k_use])
+    top_d  = [distances[i] for i in top_k]
+
+    eps     = 1e-6
+    raw_w   = np.array([1.0 / (d + eps) for d in top_d])
+    weights = raw_w / raw_w.sum()
+
+    # ── 5. Cauda ponderada (normalizada) e banda de incerteza ────────────────
+    tail_len = n_pts - m_obs
+    tail_norm = np.zeros(tail_len)
+    tail_stack: List[np.ndarray] = []
+    for w, i in zip(weights, top_k):
+        t = db_curves[i]['y_norm'][m_obs:m_obs + tail_len]
+        if len(t) < tail_len:
+            t = np.pad(t, (0, tail_len - len(t)), mode='edge')
+        tail_norm  += w * t
+        tail_stack.append(t)
+    tail_std = np.std(tail_stack, axis=0) if len(tail_stack) > 1 else np.zeros(tail_len)
+
+    # ── 6. Amplitude estimada e escala de volta para EVI ─────────────────────
+    w_amp = float(sum(w * db_curves[i]['amplitude'] for w, i in zip(weights, top_k)))
+    w_off = float(sum(w * db_curves[i]['offset']    for w, i in zip(weights, top_k)))
+    # Se já vimos o pico (obs_span ≥ 80 % da amplitude esperada), confia no obs
+    if obs_span >= 0.80 * w_amp:
+        scale = obs_span
+        base  = obs_min
+    else:
+        # Não vimos o pico — usa amplitude do banco, âncora no offset observado
+        scale = w_amp
+        base  = obs_min
+
+    tail_evi = base + scale * tail_norm
+
+    # Continuidade: desloca tail para que tail[0] ≈ obs_evi[-1]
+    if tail_len > 0:
+        gap = float(obs_evi[-1]) - float(tail_evi[0])
+        tail_evi = tail_evi + gap * np.linspace(1.0, 0.0, tail_len)
+
+    # ── 7. Datas da cauda ─────────────────────────────────────────────────────
+    w_dur          = float(sum(w * db_curves[i]['dur_days'] for w, i in zip(weights, top_k)))
+    remaining_days = max((1.0 - tau_obs) * w_dur, 1.0)
+    tail_offsets   = np.linspace(0.0, remaining_days, tail_len)
+    series_end     = pd.Timestamp(obs_dates[-1])
+    tail_dates     = [series_end + pd.Timedelta(days=float(d)) for d in tail_offsets]
+
+    # ── 8. EOS: curva cai abaixo do limiar de 25 % da amplitude ──────────────
+    eos_thr     = base + 0.25 * scale
+    forecast_eos = tail_dates[-1]
+    for dt, v in zip(tail_dates, tail_evi):
+        if v <= eos_thr:
+            forecast_eos = dt
+            break
+
+    uncertainty = float(np.std([db_curves[i]['dur_days'] for i in top_k])) if k_use > 1 else 0.0
+
+    full_dates  = list(pd.to_datetime(obs_dates)) + tail_dates
+    full_vals   = list(obs_evi) + list(tail_evi)
+    full_std    = [0.0] * len(obs_evi) + list(tail_std * scale)
+    is_forecast = [False] * len(obs_evi) + [True] * tail_len
+
+    return {
+        'success':           True,
+        'method':            'shape_matching_knn',
+        'tau_obs':           round(tau_obs, 3),
+        'n_database_cycles': len(db_curves),
+        'k_matched':         k_use,
+        'matched_cycles': [
+            {
+                'cycle_num': db_curves[i]['cycle_num'],
+                'distance':  round(distances[i], 4),
+                'weight':    round(float(weights[j]), 4),
+                'dur_days':  round(db_curves[i]['dur_days'], 1),
+            }
+            for j, i in enumerate(top_k)
+        ],
+        'series_end_date':   series_end,
+        'forecast_eos_date': forecast_eos,
+        'uncertainty_days':  round(uncertainty, 1),
+        'curve': {
+            'dates':       [str(d)[:10] for d in full_dates],
+            'values':      [round(float(v), 4) for v in full_vals],
+            'std':         [round(float(v), 4) for v in full_std],
+            'is_forecast': is_forecast,
+        },
+    }
+
+
+def validate_extrapolation(
+    fitted_cycles: List[Dict],
+    truncation_fracs: Optional[List[float]] = None,
+    k: int = 3,
+    n_pts: int = _N_NORM,
+) -> Dict[str, Any]:
+    """
+    Validação leave-one-out da extrapolação por shape-matching.
+
+    Para cada ciclo completo `j`, usa os demais como banco e testa a predição
+    do flanco descendente em diferentes frações de truncação (0.25, 0.50, 0.75).
+
+    Returns:
+        dict com 'success' e 'results' (lista por ciclo × por truncação).
+    """
+    if truncation_fracs is None:
+        truncation_fracs = [0.25, 0.50, 0.75]
+
+    complete = [c for c in fitted_cycles
+                if c.get('fit_success')
+                and not c.get('at_series_end', False)
+                and not c.get('at_series_start', False)]
+
+    if len(complete) < 2:
+        return {'success': False, 'reason': 'Mínimo de 2 ciclos completos para validação'}
+
+    results = []
+    for j_target, target in enumerate(complete):
+        y_full = _cycle_normalized_curve(target, n_pts)
+        if y_full is None:
+            continue
+
+        dur_target = float(target['cycle_length_days'])
+        db_others  = [_cycle_normalized_curve(c, n_pts)
+                      for i, c in enumerate(complete) if i != j_target]
+        db_meta    = [c for i, c in enumerate(complete) if i != j_target]
+        # filtra inválidos
+        valid      = [(y, m) for y, m in zip(db_others, db_meta) if y is not None]
+        if not valid:
+            continue
+        db_y, db_m = zip(*valid)
+        db_y = list(db_y)
+        db_m = list(db_m)
+
+        cycle_res = {
+            'cycle_num':   target['cycle_num'],
+            'dur_days':    round(dur_target, 1),
+            'season_type': target.get('season_type', '?'),
+            'y_full_norm': y_full,
+            'truncations': [],
+        }
+
+        for tau in truncation_fracs:
+            m_obs    = max(3, min(n_pts - 2, int(round(tau * n_pts))))
+            prefix_q = y_full[:m_obs]
+
+            # Distâncias e k-NN
+            dists = [float(np.sqrt(np.mean((prefix_q - y[:m_obs]) ** 2))) for y in db_y]
+            order = np.argsort(dists)
+            k_use = min(k, len(db_y))
+            top_k = list(order[:k_use])
+
+            eps     = 1e-6
+            raw_w   = np.array([1.0 / (dists[i] + eps) for i in top_k])
+            weights = raw_w / raw_w.sum()
+
+            tail_len = n_pts - m_obs
+            tail_pred = np.zeros(tail_len)
+            tail_stack = []
+            for w, i in zip(weights, top_k):
+                t = db_y[i][m_obs:m_obs + tail_len]
+                if len(t) < tail_len:
+                    t = np.pad(t, (0, tail_len - len(t)), mode='edge')
+                tail_pred  += w * t
+                tail_stack.append(t)
+            tail_std = np.std(tail_stack, axis=0) if len(tail_stack) > 1 else np.zeros(tail_len)
+
+            actual_tail = y_full[m_obs:]
+            mae = float(np.mean(np.abs(tail_pred - actual_tail)))
+
+            # EOS em fração normalizada (onde v ≤ 0.25)
+            def _eos_frac(arr):
+                for ii, v in enumerate(arr):
+                    if v <= 0.25:
+                        return (m_obs + ii) / n_pts
+                return 1.0
+
+            eos_actual = _eos_frac(actual_tail)
+            # Para predicted: w-dur ponderado (em fração de dur_target)
+            w_dur = float(sum(weights[j] * db_m[i]['cycle_length_days']
+                              for j, i in enumerate(top_k)))
+
+            def _eos_frac_pred(arr, tau_obs, w_dur, dur_ref):
+                """EOS em fração de dur_ref a partir do prefixo."""
+                for ii, v in enumerate(arr):
+                    if v <= 0.25:
+                        # tempo absoluto estimado: tau*dur_ref + (ii/tail_len)*(1-tau)*w_dur
+                        t_abs = tau_obs * dur_ref + (ii / max(tail_len, 1)) * (1 - tau_obs) * w_dur
+                        return t_abs / dur_ref
+                return None
+
+            eos_pred  = _eos_frac_pred(tail_pred, tau, w_dur, dur_target)
+            eos_err   = abs(eos_pred - eos_actual) * dur_target if eos_pred else None
+
+            cycle_res['truncations'].append({
+                'tau':          tau,
+                'm_obs':        m_obs,
+                'pred_tail':    tail_pred,
+                'pred_std':     tail_std,
+                'actual_tail':  actual_tail,
+                'matched':      [{'cycle_num': db_m[i]['cycle_num'],
+                                  'dist': round(dists[i], 4),
+                                  'weight': round(float(weights[j]), 4)}
+                                 for j, i in enumerate(top_k)],
+                'mae':          round(mae, 4),
+                'eos_error_days': round(eos_err, 1) if eos_err is not None else None,
+            })
+
+        results.append(cycle_res)
+
+    return {'success': True, 'n_cycles': len(results), 'results': results}
+
+
 def extract_phenometrics(df_ts: pd.DataFrame, ndvi_column: str = 'NDVI_mean',
                            min_cycle_length_days: int = 45,
                            smoothing_method: str = 'savgol',
