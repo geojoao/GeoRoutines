@@ -42,14 +42,16 @@ MIN_CYCLE_DAYS = {
 }
 
 MAX_CYCLE_DAYS = {
-    "soja": 160, "cana": 420, "arroz": 160, "algodao": 220,
+    "soja": 180, "cana": 420, "arroz": 160, "algodao": 220,
     "cafe": 400, "citrus": 400, "dende": 400,
     "outras_lavouras_temporarias": 200, "outras_lavouras_perenes": 400,
     "segunda_safra": 150, "segunda_safra_algodao": 220,
     "segunda_safra_outras_temporarias": 180,
 }
 
-MIN_GROWING_DAYS = 35  # largura mínima do pico (SOS->EOS); rejeita spikes degenerados
+MIN_GROWING_DAYS = 35    # largura mínima do pico (SOS->EOS); rejeita spikes degenerados
+MIN_EVI_AMPLITUDE = 0.08
+MIN_R2_PER_CYCLE = 0.80
 
 app = FastAPI(title="Fenologia Brasil")
 
@@ -153,7 +155,7 @@ def api_cycles(hex_id: str, cultura: str):
     if cache_key in _cycles_cache:
         return JSONResponse(_cycles_cache[cache_key])
 
-    from fenologia.phenophase import extract_phenometrics, adaptive_smoothing
+    from fenologia.phenophase import extract_phenometrics, adaptive_smoothing, asymmetric_gaussian
 
     col = f"evi_medio_{cultura}"
     if hex_id not in _ts.index:
@@ -177,7 +179,7 @@ def api_cycles(hex_id: str, cultura: str):
         ndvi_column="NDVI_mean",
         min_cycle_length_days=min_days,
         smoothing_method="both",
-        quality_threshold=0.85,
+        quality_threshold=MIN_R2_PER_CYCLE,
     )
 
     # Série suavizada (mesmo método do phenophase)
@@ -192,16 +194,19 @@ def api_cycles(hex_id: str, cultura: str):
     for c in result.get("cycles", []):
         if not c.get("fit_success"):
             continue
-        # Filtra pela LARGURA DO PICO (SOS->EOS), não pelo intervalo vale-a-vale
-        # do segmento — ver extract_phenology.py para a justificativa.
+        # Filtra pela LARGURA DO PICO (SOS->EOS), amplitude mínima e R²
         growing = c["phenophase_days"]["eos_days"] - c["phenophase_days"]["sos_days"]
+        amp = c["gaussian_params"]["amplitude"]
+        r2 = c["r_squared"]
         if not (MIN_GROWING_DAYS <= growing <= max_days):
+            continue
+        if amp < MIN_EVI_AMPLITUDE or r2 < MIN_R2_PER_CYCLE:
             continue
         gp = c["gaussian_params"]
         ph = c["phenophase_dates"]
         pv = c["phenophase_values"]
 
-        # Gera pontos densos da gaussiana (a cada 4 dias no intervalo do ciclo)
+        # Gera pontos densos da gaussiana assimétrica (a cada 4 dias no intervalo do ciclo)
         cs = pd.Timestamp(c["cycle_start"])
         ce = pd.Timestamp(c["cycle_end"])
         n_pts = max(60, int(c["cycle_length_days"] / 3))
@@ -211,11 +216,14 @@ def api_cycles(hex_id: str, cultura: str):
             if t > ce:
                 break
             x = (t - cs).total_seconds() / 86400
-            y = (gp["amplitude"]
-                 * np.exp(-0.5 * ((x - gp["mean_days"]) / gp["std_dev_days"]) ** 2)
-                 + gp["offset"])
+            y = float(asymmetric_gaussian(
+                np.array([x]),
+                gp["amplitude"], gp["mean_days"],
+                gp["std_left_days"], gp["std_right_days"],
+                gp["offset"]
+            )[0])
             gauss_dates.append(str(t)[:10])
-            gauss_vals.append(round(float(y), 4))
+            gauss_vals.append(round(y, 4))
 
         cycles_out.append({
             "cycle_num":         c["cycle_num"],
