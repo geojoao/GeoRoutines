@@ -17,7 +17,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 sys.path.insert(0, str(Path(__file__).parent))
-from fenologia.phenophase import extract_phenometrics, adaptive_smoothing, gaussian
+from fenologia.phenophase import extract_phenometrics, adaptive_smoothing, asymmetric_gaussian
 
 MIN_CYCLE_DAYS = {
     "soja": 120, "cana": 150, "arroz": 100, "algodao": 110, "cafe": 120,
@@ -26,13 +26,13 @@ MIN_CYCLE_DAYS = {
     "segunda_safra_algodao": 100, "segunda_safra_outras_temporarias": 90,
 }
 MAX_CYCLE_DAYS = {
-    "soja": 160, "cana": 420, "arroz": 160, "algodao": 220, "cafe": 400,
+    "soja": 180, "cana": 420, "arroz": 160, "algodao": 220, "cafe": 400,
     "citrus": 400, "dende": 400, "outras_lavouras_temporarias": 200,
     "outras_lavouras_perenes": 400, "segunda_safra": 150,
     "segunda_safra_algodao": 220, "segunda_safra_outras_temporarias": 180,
 }
 MIN_EVI_AMPLITUDE = 0.08
-MIN_R2 = 0.85
+MIN_R2 = 0.80
 MIN_GROWING_DAYS = 35  # largura mínima do pico (SOS->EOS) — rejeita spikes degenerados
 
 PARTS = Path("data/output/_parts")
@@ -83,7 +83,8 @@ def plot_hex(ax, hex_id, ts_df, cultura):
         cs = pd.Timestamp(c["cycle_start"]); ce = pd.Timestamp(c["cycle_end"])
         gp = c["gaussian_params"]
         xs = np.linspace(0, L, 80)
-        ys = gaussian(xs, gp["amplitude"], gp["mean_days"], gp["std_dev_days"], gp["offset"])
+        ys = asymmetric_gaussian(xs, gp["amplitude"], gp["mean_days"],
+                                 gp["std_left_days"], gp["std_right_days"], gp["offset"])
         gdt = [cs + pd.Timedelta(days=float(x)) for x in xs]
         style = "-" if kept else ":"
         ax.plot(gdt, ys, style, color=color, lw=2 if kept else 1, alpha=0.9 if kept else 0.5)

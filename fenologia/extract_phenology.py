@@ -58,7 +58,7 @@ MIN_CYCLE_DAYS = {
 # Ciclos gaussianos além desse limite são descartados como ruído de outras
 # culturas ou artefatos de suavização temporal.
 MAX_CYCLE_DAYS = {
-    "soja": 160,                          # MG4–MG9+: 90–155 dias; acima = ruído
+    "soja": 180,                          # MG4–MG9+: 90–155 dias pico; até 180 com gaussiana assimétrica
     "cana": 420,                          # ratoon anual ~360 dias; 1ª safra até 18 meses
     "arroz": 160,                         # irrigado/sequeiro: 85–130 dias
     "algodao": 220,                       # Cerrado/MT: 150–185 dias
@@ -73,7 +73,7 @@ MAX_CYCLE_DAYS = {
 }
 
 MIN_EVI_AMPLITUDE = 0.08
-MIN_R2_PER_CYCLE = 0.85  # descarta ciclos com ajuste gaussiano ruim
+MIN_R2_PER_CYCLE = 0.80  # gaussiana assimétrica permite reduzir de 0.85 → 0.80
 MIN_GROWING_DAYS = 35    # largura mínima do pico (SOS->EOS); rejeita spikes degenerados
 
 PARTS_DIR = Path("data/output/_parts")

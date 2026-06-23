@@ -404,9 +404,21 @@ def segment_around_peaks(
 
 
 def gaussian(x: np.ndarray, amplitude: float, mean: float, std: float, offset: float) -> np.ndarray:
+    """Gaussiana simétrica — mantida para compatibilidade e visualização."""
+    return amplitude * np.exp(-((x - mean) ** 2) / (2 * std ** 2)) + offset
+
+
+def asymmetric_gaussian(x: np.ndarray, amplitude: float, mean: float,
+                        std_left: float, std_right: float, offset: float) -> np.ndarray:
     """
-    Modelo gaussiano para ajuste de dados fenológicos.
+    Gaussiana assimétrica (split-Gaussian): usa std_left para o flanco de
+    subida (x < mean) e std_right para o flanco de descida (x >= mean).
+
+    Adequada para picos vegetativos com subida rápida e descida lenta (ex: soja),
+    onde a Gaussiana simétrica tende a ter R² < 0.85.
     """
+    x = np.asarray(x, dtype=float)
+    std = np.where(x < mean, std_left, std_right)
     return amplitude * np.exp(-((x - mean) ** 2) / (2 * std ** 2)) + offset
 
 
@@ -457,55 +469,72 @@ def fit_gaussian_to_cycle(ndvi_values: np.ndarray, dates: np.ndarray, cycle: Dic
     
     # Parâmetros iniciais para o ajuste
     amplitude_init = np.max(ndvi_cycle) - np.min(ndvi_cycle)
-    mean_init = days_since_start[np.argmax(ndvi_cycle)]
+    peak_pos_idx = int(np.argmax(ndvi_cycle))
+    mean_init = days_since_start[peak_pos_idx]
     offset_init = np.min(ndvi_cycle)
-
-    # std_init via FWHM observado: mais robusto que 1/4 da janela quando a
-    # janela é muito mais larga que o pico (ex.: ciclo anual em janela de 365d).
-    half_amp_thresh = offset_init + amplitude_init * 0.5
-    above_half = ndvi_cycle >= half_amp_thresh
-    if above_half.sum() >= 2:
-        fwhm = days_since_start[above_half][-1] - days_since_start[above_half][0]
-        std_init = max(5.0, fwhm / 2.355)   # FWHM = 2.355 * sigma
-    else:
-        std_init = max(5.0, (days_since_start[-1] - days_since_start[0]) / 6.0)
-
     window_len = days_since_start[-1] - days_since_start[0]
-    initial_guess = [amplitude_init, mean_init, std_init, offset_init]
 
-    # Define limites para o ajuste
-    lower_bounds = [0.01, days_since_start[0], 5.0, -0.5]
-    upper_bounds = [1.0, days_since_start[-1], window_len / 3.0, np.max(ndvi_cycle)]
-    
+    # Estima std_left e std_right separadamente via HWFM (Half-Width at Half-Max)
+    # em cada flanco do pico — captura a assimetria de picos vegetativos.
+    half_amp_thresh = offset_init + amplitude_init * 0.5
+    _sqrt_2ln2 = np.sqrt(2 * np.log(2))  # HWFM = sigma * sqrt(2*ln2) ≈ 1.177 * sigma
+
+    left_part = ndvi_cycle[:peak_pos_idx + 1]
+    above_left = np.where(left_part >= half_amp_thresh)[0]
+    if len(above_left) >= 1:
+        hwfm_left = mean_init - days_since_start[above_left[0]]
+        std_init_left = max(5.0, hwfm_left / _sqrt_2ln2)
+    else:
+        std_init_left = max(5.0, mean_init / 3.0)
+
+    right_part = ndvi_cycle[peak_pos_idx:]
+    above_right = np.where(right_part >= half_amp_thresh)[0]
+    if len(above_right) >= 1:
+        hwfm_right = days_since_start[peak_pos_idx + above_right[-1]] - mean_init
+        std_init_right = max(5.0, hwfm_right / _sqrt_2ln2)
+    else:
+        std_init_right = max(5.0, (window_len - mean_init) / 3.0)
+
+    initial_guess = [amplitude_init, mean_init, std_init_left, std_init_right, offset_init]
+
+    # Bounds: mean deve estar dentro da janela; stds limitados a 1/2 da janela
+    lower_bounds = [0.01, days_since_start[0], 5.0, 5.0, -0.5]
+    upper_bounds = [1.0, days_since_start[-1], window_len / 2.0, window_len / 2.0, np.max(ndvi_cycle)]
+
+    # Garante que o chute inicial está dentro dos bounds
+    initial_guess[0] = np.clip(initial_guess[0], lower_bounds[0], upper_bounds[0])
+    initial_guess[1] = np.clip(initial_guess[1], lower_bounds[1], upper_bounds[1])
+    initial_guess[2] = np.clip(initial_guess[2], lower_bounds[2], upper_bounds[2])
+    initial_guess[3] = np.clip(initial_guess[3], lower_bounds[3], upper_bounds[3])
+    initial_guess[4] = np.clip(initial_guess[4], lower_bounds[4], upper_bounds[4])
+
     try:
-        # Ajusta a gaussiana
-        popt, pcov = curve_fit(
-            gaussian, 
-            days_since_start, 
+        popt, _ = curve_fit(
+            asymmetric_gaussian,
+            days_since_start,
             ndvi_cycle,
             p0=initial_guess,
             bounds=(lower_bounds, upper_bounds),
             maxfev=10000,
             method='trf'
         )
-        
-        amplitude, mean_pos, std_dev, offset = popt
-        
-        # Valida parâmetros (evita gaussianas invertidas ou degeneradas)
-        if amplitude < 0.01 or std_dev < 2:
+
+        amplitude, mean_pos, std_left, std_right, offset = popt
+
+        # Valida parâmetros degenerados
+        if amplitude < 0.01 or std_left < 2 or std_right < 2:
             return {
                 'fit_success': False,
                 'reason': 'Parâmetros degenerados',
                 'cycle': cycle
             }
-        
-        # Calcula qualidade do ajuste (R²)
-        residuals = ndvi_cycle - gaussian(days_since_start, *popt)
+
+        # Calcula R²
+        residuals = ndvi_cycle - asymmetric_gaussian(days_since_start, *popt)
         ss_res = np.sum(residuals ** 2)
         ss_tot = np.sum((ndvi_cycle - np.mean(ndvi_cycle)) ** 2)
         r_squared = 1 - (ss_res / (ss_tot + 1e-8))
-        
-        # Verifica qualidade mínima
+
         if r_squared < quality_threshold:
             return {
                 'fit_success': False,
@@ -513,25 +542,24 @@ def fit_gaussian_to_cycle(ndvi_values: np.ndarray, dates: np.ndarray, cycle: Dic
                 'r_squared': r_squared,
                 'cycle': cycle
             }
-        
-        # Extrai pontos fenológicos (SOS, POS, EOS)
-        # SOS/EOS: ponto onde gaussiana atinge 25% da amplitude
+
+        # SOS/EOS: ponto onde a gaussiana assimétrica atinge 25% da amplitude.
+        # SOS usa std_left (flanco de subida), EOS usa std_right (flanco de descida).
         amplitude_25pct = 0.25
-        x_offset = np.sqrt(-2 * std_dev ** 2 * np.log(amplitude_25pct))
-        
-        sos_days = max(mean_pos - x_offset, days_since_start[0])
-        eos_days = min(mean_pos + x_offset, days_since_start[-1])
-        
-        # Converte para datas reais
+        x_offset_sos = std_left * np.sqrt(-2 * np.log(amplitude_25pct))
+        x_offset_eos = std_right * np.sqrt(-2 * np.log(amplitude_25pct))
+
+        sos_days = max(mean_pos - x_offset_sos, days_since_start[0])
+        eos_days = min(mean_pos + x_offset_eos, days_since_start[-1])
+
         sos_date = pd.Timestamp(dates_cycle[0]) + timedelta(days=float(sos_days))
         pos_date = pd.Timestamp(dates_cycle[0]) + timedelta(days=float(mean_pos))
         eos_date = pd.Timestamp(dates_cycle[0]) + timedelta(days=float(eos_days))
-        
-        # Calcula valores de NDVI em pontos fenológicos
-        sos_ndvi = gaussian(sos_days, *popt)
-        pos_ndvi = gaussian(mean_pos, *popt)
-        eos_ndvi = gaussian(eos_days, *popt)
-        
+
+        sos_ndvi = asymmetric_gaussian(sos_days, *popt)
+        pos_ndvi = asymmetric_gaussian(mean_pos, *popt)
+        eos_ndvi = asymmetric_gaussian(eos_days, *popt)
+
         return {
             'fit_success': True,
             'cycle_num': cycle['cycle_num'],
@@ -544,7 +572,9 @@ def fit_gaussian_to_cycle(ndvi_values: np.ndarray, dates: np.ndarray, cycle: Dic
             'gaussian_params': {
                 'amplitude': float(amplitude),
                 'mean_days': float(mean_pos),
-                'std_dev_days': float(std_dev),
+                'std_left_days': float(std_left),
+                'std_right_days': float(std_right),
+                'std_dev_days': float((std_left + std_right) / 2),  # média para compatibilidade
                 'offset': float(offset)
             },
             'phenophase_dates': {
@@ -563,7 +593,7 @@ def fit_gaussian_to_cycle(ndvi_values: np.ndarray, dates: np.ndarray, cycle: Dic
                 'eos_days': float(eos_days)
             }
         }
-    
+
     except Exception as e:
         return {
             'fit_success': False,
@@ -624,10 +654,16 @@ def extract_phenometrics(df_ts: pd.DataFrame, ndvi_column: str = 'NDVI_mean',
     # Etapa 1: Suavização adaptativa
     ndvi_smooth = adaptive_smoothing(ndvi_values, dates, method=smoothing_method)
 
-    # Etapa 2: Detecção direta de picos vegetativos (não depende de vales)
+    # Etapa 2: Detecção direta de picos vegetativos (não depende de vales).
+    # A distância mínima de DETECÇÃO é mais curta que o ciclo mínimo agronômico
+    # para capturar safra+safrinha mesmo quando o vale entre-safra fica elevado
+    # (hexágonos mistos onde parte dos pixels ainda tem cultura crescendo enquanto
+    # outra parte está em solo exposto).  O filtro por MIN_CYCLE_DAYS é aplicado
+    # no pós-fit via extract_phenology.py, não aqui.
+    detection_distance_days = max(60, int(min_cycle_length_days * 0.65))
     peaks = detect_vegetation_peaks(
         ndvi_smooth, dates,
-        min_distance_days=min_cycle_length_days,
+        min_distance_days=detection_distance_days,
     )
 
     # Etapa 3: Define janelas ao redor de cada pico
@@ -671,6 +707,7 @@ def extract_phenometrics(df_ts: pd.DataFrame, ndvi_column: str = 'NDVI_mean',
             'ndvi_std': float(np.std(ndvi_values)),
             'num_peaks': len(peaks),
             'peak_indices': peaks.tolist(),
+            'detection_distance_days': detection_distance_days,
         }
     }
 
@@ -820,11 +857,13 @@ def plot_diagnostic(df_ts: pd.DataFrame, phenometrics: Dict, ndvi_column: str = 
                                             for d in cycle_dates], dtype=float)
                 
                 params = cycle['gaussian_params']
-                gaussian_vals = gaussian(days_since_start, 
-                                       params['amplitude'],
-                                       params['mean_days'],
-                                       params['std_dev_days'],
-                                       params['offset'])
+                gaussian_vals = asymmetric_gaussian(
+                    days_since_start,
+                    params['amplitude'],
+                    params['mean_days'],
+                    params['std_left_days'],
+                    params['std_right_days'],
+                    params['offset'])
                 
                 ax.plot(cycle_dates, gaussian_vals, '--', linewidth=2.5, 
                        color=color, label=f'Ciclo {cycle["cycle_num"]} (R²={cycle["r_squared"]:.3f})')

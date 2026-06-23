@@ -24,7 +24,7 @@ from fenologia.phenophase import (
     detect_vegetation_peaks,
     segment_around_peaks,
     fit_gaussian_to_cycle,
-    gaussian,
+    asymmetric_gaussian,
 )
 
 # Thresholds de produção (extract_phenology.py)
@@ -36,14 +36,14 @@ MIN_CYCLE_DAYS = {
     "segunda_safra_outras_temporarias": 90,
 }
 MAX_CYCLE_DAYS = {
-    "soja": 160, "cana": 420, "arroz": 160, "algodao": 220,
+    "soja": 180, "cana": 420, "arroz": 160, "algodao": 220,
     "cafe": 400, "citrus": 400, "dende": 400,
     "outras_lavouras_temporarias": 200, "outras_lavouras_perenes": 400,
     "segunda_safra": 150, "segunda_safra_algodao": 220,
     "segunda_safra_outras_temporarias": 180,
 }
 MIN_EVI_AMPLITUDE = 0.08
-MIN_R2_PER_CYCLE = 0.85
+MIN_R2_PER_CYCLE = 0.80
 MIN_GROWING_DAYS = 35
 
 OUTPUT_DIR = Path("/tmp/claude-0/-home-user-GeoRoutines/26308b7a-b490-5a76-b07b-0a1edd131b59/scratchpad")
@@ -91,9 +91,12 @@ def diagnose_hexagono(hex_id: str, dates: np.ndarray, evi: np.ndarray,
     # Etapa 2: Detecção de picos
     total_days = float((dates_v[-1] - dates_v[0]) / np.timedelta64(1, "D"))
     min_dist = MIN_CYCLE_DAYS.get(cultura, 90)
+    # Distância de detecção = 65% do ciclo mínimo (igual ao extract_phenometrics)
+    detection_dist = max(60, int(min_dist * 0.65))
     ndvi_std = float(np.std(evi_smooth))
     prominence_min = max(0.03, ndvi_std * 0.25)
-    min_distance_idx = max(1, int(min_dist * len(evi_smooth) / total_days))
+    min_distance_idx = max(1, int(detection_dist * len(evi_smooth) / total_days))
+    min_distance_idx_full = max(1, int(min_dist * len(evi_smooth) / total_days))
 
     peaks_raw, peak_props = find_peaks(
         evi_smooth,
@@ -103,14 +106,17 @@ def diagnose_hexagono(hex_id: str, dates: np.ndarray, evi: np.ndarray,
 
     # Testa sem filtro de distância (para ver picos bloqueados)
     peaks_nodist, _ = find_peaks(evi_smooth, prominence=prominence_min)
-    peaks_noprom, _ = find_peaks(evi_smooth, distance=min_distance_idx)
+    peaks_noprom, _ = find_peaks(evi_smooth, distance=min_distance_idx_full)
+    # Picos adicionais capturados pela distância reduzida
+    peaks_full_dist, _ = find_peaks(evi_smooth, distance=min_distance_idx_full, prominence=prominence_min)
 
     result["detalhes"]["prominence_threshold"] = round(prominence_min, 4)
-    result["detalhes"]["min_distance_dias"] = min_dist
+    result["detalhes"]["min_distance_dias"] = detection_dist
     result["detalhes"]["min_distance_idx"] = min_distance_idx
     result["detalhes"]["n_picos_detectados"] = int(len(peaks_raw))
     result["detalhes"]["n_picos_sem_distancia"] = int(len(peaks_nodist))
-    result["detalhes"]["n_picos_sem_prominence"] = int(len(peaks_noprom))
+    result["detalhes"]["n_picos_distancia_120"] = int(len(peaks_full_dist))
+    result["detalhes"]["n_picos_distancia_78"] = int(len(peaks_raw))
 
     if len(peaks_raw) == 0:
         if len(peaks_nodist) > 0:
@@ -284,8 +290,8 @@ def plot_diagnostic(diag: dict, titulo: str, output_path: Path):
             [(d - dates_cyc[0]) / np.timedelta64(1, "D") for d in dates_cyc], dtype=float
         )
         p = fit["gaussian_params"]
-        gauss_vals = gaussian(days_from_start, p["amplitude"], p["mean_days"],
-                              p["std_dev_days"], p["offset"])
+        gauss_vals = asymmetric_gaussian(days_from_start, p["amplitude"], p["mean_days"],
+                                        p["std_left_days"], p["std_right_days"], p["offset"])
         label_g = (f"Ciclo {cyc_diag['cycle_num']} "
                    f"R²={fit['r_squared']:.3f} | "
                    f"amp={p['amplitude']:.3f} | "
@@ -423,7 +429,8 @@ def run_debug(cultura: str = "soja", n_casos: int = 8):
     print(f"\n  {'─'*40}")
     print(f"  RESUMO DE FALHAS ({cultura}):")
     for motivo, contagem in sorted(resumo_falhas.items(), key=lambda x: -x[1]):
-        print(f"    {motivo:<40} {contagem:>3}x")
+        motivo_str = str(motivo) if motivo is not None else "ok (detectado)"
+        print(f"    {motivo_str:<40} {contagem:>3}x")
 
     # ── Geração de plots ─────────────────────────────────────────────────────
     print(f"\n{'='*60}")
