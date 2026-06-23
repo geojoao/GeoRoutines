@@ -669,29 +669,73 @@ def _cycle_normalized_curve(cycle_fit: Dict, n: int = _N_NORM) -> Optional[np.nd
     return (y - y.min()) / span
 
 
+def _select_db_cycles(
+    db_curves: List[Dict],
+    distances: np.ndarray,
+    target_season_type: Optional[str] = None,
+    min_keep: int = 2,
+    iqr_factor: float = 1.5,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Seleciona ciclos do banco filtrando por season_type e removendo outliers.
+
+    Lógica:
+    1. Filtra por season_type (somente se restar >= min_keep ciclos)
+    2. Remove outliers pela cerca IQR superior: threshold = Q3 + iqr_factor * IQR
+    3. Se sobrar < min_keep após o corte, cancela o corte
+    4. Calcula pesos = 1/dist
+
+    Returns:
+        (indices, distances, weights) como np.ndarray
+    """
+    n       = len(db_curves)
+    sel_idx = np.arange(n)
+
+    # 1. Filtro por season_type
+    if target_season_type:
+        same = np.array([db_curves[i].get('season_type') == target_season_type
+                         for i in range(n)])
+        if same.sum() >= min_keep:
+            sel_idx = sel_idx[same]
+
+    # 2. Remoção de outliers por IQR
+    sub_d = distances[sel_idx]
+    q1, q3 = np.percentile(sub_d, [25, 75])
+    upper  = q3 + iqr_factor * (q3 - q1)
+    inlier = sub_d <= upper
+    if inlier.sum() >= min_keep:
+        sel_idx = sel_idx[inlier]
+
+    # 3. Pesos inverso-distância
+    sel_d = distances[sel_idx]
+    eps   = 1e-6
+    raw_w = 1.0 / (sel_d + eps)
+    return sel_idx, sel_d, raw_w / raw_w.sum()
+
+
 def extrapolate_terminal_cycle(
     ndvi_smooth: np.ndarray,
     dates: np.ndarray,
     fitted_cycles: List[Dict],
-    k: int = 3,
+    iqr_factor: float = 1.5,
+    min_keep: int = 2,
     n_pts: int = _N_NORM,
 ) -> Dict[str, Any]:
     """
-    Extrapola o ciclo vegetativo em andamento no final da série usando k-NN
-    sobre a forma normalizada dos ciclos passados completos do mesmo hexágono.
+    Extrapola o ciclo vegetativo em andamento no final da série usando
+    shape-matching sobre curvas logísticas normalizadas dos ciclos históricos.
 
-    Método:
-      1. Encontra o ciclo terminal (at_series_end=True).
-      2. Normaliza o trecho observado para [0,1]×[0,1].
-      3. Compara com os prefixos dos ciclos completos (distância L²).
-      4. Calcula a cauda ponderada pelos k mais próximos.
-      5. Re-escala para unidades EVI e converte para datas absolutas.
+    Selecção dos ciclos de referência:
+      1. Filtra por season_type do ciclo terminal (se disponível)
+      2. Remove outliers por IQR (critério Tukey)
+      3. Usa TODOS os ciclos restantes ponderados por 1/distância L²
 
     Args:
         ndvi_smooth   : EVI suavizado (mesma dimensão de dates)
         dates         : array np.datetime64
         fitted_cycles : lista de cycles de extract_phenometrics['cycles']
-        k             : número de vizinhos mais próximos
+        iqr_factor    : fator IQR para corte de outliers (padrão=1.5)
+        min_keep      : mínimo de ciclos no banco após filtros
         n_pts         : resolução da curva normalizada
 
     Returns:
@@ -712,8 +756,10 @@ def extrapolate_terminal_cycle(
     if terminal.get('fit_success'):
         t_start   = np.datetime64(terminal['cycle_start'])
         start_idx = int(np.searchsorted(dates, t_start))
+        term_season = terminal.get('season_type')
     else:
-        start_idx = terminal['cycle']['start_idx']
+        start_idx   = terminal['cycle']['start_idx']
+        term_season = terminal.get('cycle', {}).get('season_type')
     end_idx = len(dates) - 1
 
     obs_evi   = ndvi_smooth[start_idx:end_idx + 1].astype(float)
@@ -734,11 +780,12 @@ def extrapolate_terminal_cycle(
             continue
         cp = c['curve_params']
         db_curves.append({
-            'cycle_num': c['cycle_num'],
-            'dur_days':  float(c['cycle_length_days']),
-            'amplitude': float(cp['amplitude']),
-            'offset':    float(cp['offset']),
-            'y_norm':    y_norm,
+            'cycle_num':   c['cycle_num'],
+            'season_type': c.get('season_type'),
+            'dur_days':    float(c['cycle_length_days']),
+            'amplitude':   float(cp['amplitude']),
+            'offset':      float(cp['offset']),
+            'y_norm':      y_norm,
         })
 
     if not db_curves:
@@ -762,26 +809,21 @@ def extrapolate_terminal_cycle(
     t_dst = np.linspace(0.0, 1.0, m_obs)
     obs_resampled = np.interp(t_dst, t_src, obs_norm)
 
-    # ── 4. Distâncias L² e k vizinhos mais próximos ───────────────────────────
-    distances = []
-    for d in db_curves:
-        prefix = d['y_norm'][:m_obs]
-        distances.append(float(np.sqrt(np.mean((obs_resampled - prefix) ** 2))))
-
-    order  = np.argsort(distances)
-    k_use  = min(k, len(db_curves))
-    top_k  = list(order[:k_use])
-    top_d  = [distances[i] for i in top_k]
-
-    eps     = 1e-6
-    raw_w   = np.array([1.0 / (d + eps) for d in top_d])
-    weights = raw_w / raw_w.sum()
+    # ── 4. Distâncias L² → seleção por season_type + IQR ─────────────────────
+    all_dists = np.array([
+        float(np.sqrt(np.mean((obs_resampled - d['y_norm'][:m_obs]) ** 2)))
+        for d in db_curves
+    ])
+    sel_idx, sel_dists, weights = _select_db_cycles(
+        db_curves, all_dists, term_season, min_keep, iqr_factor
+    )
+    n_removed = len(db_curves) - len(sel_idx)
 
     # ── 5. Cauda ponderada (normalizada) e banda de incerteza ────────────────
-    tail_len = n_pts - m_obs
+    tail_len  = n_pts - m_obs
     tail_norm = np.zeros(tail_len)
     tail_stack: List[np.ndarray] = []
-    for w, i in zip(weights, top_k):
+    for w, i in zip(weights, sel_idx):
         t = db_curves[i]['y_norm'][m_obs:m_obs + tail_len]
         if len(t) < tail_len:
             t = np.pad(t, (0, tail_len - len(t)), mode='edge')
@@ -790,14 +832,11 @@ def extrapolate_terminal_cycle(
     tail_std = np.std(tail_stack, axis=0) if len(tail_stack) > 1 else np.zeros(tail_len)
 
     # ── 6. Amplitude estimada e escala de volta para EVI ─────────────────────
-    w_amp = float(sum(w * db_curves[i]['amplitude'] for w, i in zip(weights, top_k)))
-    w_off = float(sum(w * db_curves[i]['offset']    for w, i in zip(weights, top_k)))
-    # Se já vimos o pico (obs_span ≥ 80 % da amplitude esperada), confia no obs
+    w_amp = float(sum(w * db_curves[i]['amplitude'] for w, i in zip(weights, sel_idx)))
     if obs_span >= 0.80 * w_amp:
         scale = obs_span
         base  = obs_min
     else:
-        # Não vimos o pico — usa amplitude do banco, âncora no offset observado
         scale = w_amp
         base  = obs_min
 
@@ -809,21 +848,21 @@ def extrapolate_terminal_cycle(
         tail_evi = tail_evi + gap * np.linspace(1.0, 0.0, tail_len)
 
     # ── 7. Datas da cauda ─────────────────────────────────────────────────────
-    w_dur          = float(sum(w * db_curves[i]['dur_days'] for w, i in zip(weights, top_k)))
+    w_dur          = float(sum(w * db_curves[i]['dur_days'] for w, i in zip(weights, sel_idx)))
     remaining_days = max((1.0 - tau_obs) * w_dur, 1.0)
     tail_offsets   = np.linspace(0.0, remaining_days, tail_len)
     series_end     = pd.Timestamp(obs_dates[-1])
     tail_dates     = [series_end + pd.Timedelta(days=float(d)) for d in tail_offsets]
 
     # ── 8. EOS: curva cai abaixo do limiar de 25 % da amplitude ──────────────
-    eos_thr     = base + 0.25 * scale
+    eos_thr      = base + 0.25 * scale
     forecast_eos = tail_dates[-1]
     for dt, v in zip(tail_dates, tail_evi):
         if v <= eos_thr:
             forecast_eos = dt
             break
 
-    uncertainty = float(np.std([db_curves[i]['dur_days'] for i in top_k])) if k_use > 1 else 0.0
+    uncertainty = float(np.std([db_curves[i]['dur_days'] for i in sel_idx])) if len(sel_idx) > 1 else 0.0
 
     full_dates  = list(pd.to_datetime(obs_dates)) + tail_dates
     full_vals   = list(obs_evi) + list(tail_evi)
@@ -831,19 +870,22 @@ def extrapolate_terminal_cycle(
     is_forecast = [False] * len(obs_evi) + [True] * tail_len
 
     return {
-        'success':           True,
-        'method':            'shape_matching_knn',
-        'tau_obs':           round(tau_obs, 3),
-        'n_database_cycles': len(db_curves),
-        'k_matched':         k_use,
+        'success':              True,
+        'method':               'shape_matching_knn',
+        'tau_obs':              round(tau_obs, 3),
+        'season_type_filter':   term_season,
+        'n_database_cycles':    len(db_curves),
+        'n_cycles_used':        int(len(sel_idx)),
+        'n_outliers_removed':   int(n_removed),
         'matched_cycles': [
             {
-                'cycle_num': db_curves[i]['cycle_num'],
-                'distance':  round(distances[i], 4),
-                'weight':    round(float(weights[j]), 4),
-                'dur_days':  round(db_curves[i]['dur_days'], 1),
+                'cycle_num':   db_curves[i]['cycle_num'],
+                'season_type': db_curves[i]['season_type'],
+                'distance':    round(float(all_dists[i]), 4),
+                'weight':      round(float(weights[j]), 4),
+                'dur_days':    round(db_curves[i]['dur_days'], 1),
             }
-            for j, i in enumerate(top_k)
+            for j, i in enumerate(sel_idx)
         ],
         'series_end_date':   series_end,
         'forecast_eos_date': forecast_eos,
@@ -860,14 +902,16 @@ def extrapolate_terminal_cycle(
 def validate_extrapolation(
     fitted_cycles: List[Dict],
     truncation_fracs: Optional[List[float]] = None,
-    k: int = 3,
+    iqr_factor: float = 1.5,
+    min_keep: int = 2,
     n_pts: int = _N_NORM,
 ) -> Dict[str, Any]:
     """
     Validação leave-one-out da extrapolação por shape-matching.
 
-    Para cada ciclo completo `j`, usa os demais como banco e testa a predição
-    do flanco descendente em diferentes frações de truncação (0.25, 0.50, 0.75).
+    Para cada ciclo completo `j`, usa os demais como banco (filtrado por
+    season_type e com remoção de outliers IQR) e testa a predição do flanco
+    descendente em diferentes frações de truncação (0.25, 0.50, 0.75).
 
     Returns:
         dict com 'success' e 'results' (lista por ciclo × por truncação).
@@ -883,28 +927,47 @@ def validate_extrapolation(
     if len(complete) < 2:
         return {'success': False, 'reason': 'Mínimo de 2 ciclos completos para validação'}
 
+    def _eos_days(arr, m_obs_local, n_pts_local, dur_ref, tau_obs, w_dur_matched):
+        """Tempo absoluto (dias) do EOS estimado."""
+        tl = n_pts_local - m_obs_local
+        for ii, v in enumerate(arr):
+            if v <= 0.25:
+                t_abs = tau_obs * dur_ref + (ii / max(tl, 1)) * (1 - tau_obs) * w_dur_matched
+                return t_abs
+        return None
+
     results = []
     for j_target, target in enumerate(complete):
         y_full = _cycle_normalized_curve(target, n_pts)
         if y_full is None:
             continue
 
-        dur_target = float(target['cycle_length_days'])
-        db_others  = [_cycle_normalized_curve(c, n_pts)
-                      for i, c in enumerate(complete) if i != j_target]
-        db_meta    = [c for i, c in enumerate(complete) if i != j_target]
-        # filtra inválidos
-        valid      = [(y, m) for y, m in zip(db_others, db_meta) if y is not None]
-        if not valid:
+        dur_target   = float(target['cycle_length_days'])
+        target_stype = target.get('season_type')
+
+        # banco: todos exceto j_target, já com season_type e amplitude
+        others_raw = [c for i, c in enumerate(complete) if i != j_target]
+        db_local: List[Dict] = []
+        for c in others_raw:
+            y = _cycle_normalized_curve(c, n_pts)
+            if y is None:
+                continue
+            cp = c['curve_params']
+            db_local.append({
+                'cycle_num':   c['cycle_num'],
+                'season_type': c.get('season_type'),
+                'dur_days':    float(c['cycle_length_days']),
+                'amplitude':   float(cp['amplitude']),
+                'y_norm':      y,
+            })
+
+        if not db_local:
             continue
-        db_y, db_m = zip(*valid)
-        db_y = list(db_y)
-        db_m = list(db_m)
 
         cycle_res = {
             'cycle_num':   target['cycle_num'],
             'dur_days':    round(dur_target, 1),
-            'season_type': target.get('season_type', '?'),
+            'season_type': target_stype or '?',
             'y_full_norm': y_full,
             'truncations': [],
         }
@@ -912,22 +975,22 @@ def validate_extrapolation(
         for tau in truncation_fracs:
             m_obs    = max(3, min(n_pts - 2, int(round(tau * n_pts))))
             prefix_q = y_full[:m_obs]
-
-            # Distâncias e k-NN
-            dists = [float(np.sqrt(np.mean((prefix_q - y[:m_obs]) ** 2))) for y in db_y]
-            order = np.argsort(dists)
-            k_use = min(k, len(db_y))
-            top_k = list(order[:k_use])
-
-            eps     = 1e-6
-            raw_w   = np.array([1.0 / (dists[i] + eps) for i in top_k])
-            weights = raw_w / raw_w.sum()
-
             tail_len = n_pts - m_obs
-            tail_pred = np.zeros(tail_len)
+
+            all_dists = np.array([
+                float(np.sqrt(np.mean((prefix_q - d['y_norm'][:m_obs]) ** 2)))
+                for d in db_local
+            ])
+            sel_idx, sel_dists, weights = _select_db_cycles(
+                db_local, all_dists, target_stype, min_keep, iqr_factor
+            )
+            n_used    = int(len(sel_idx))
+            n_removed = len(db_local) - n_used
+
+            tail_pred  = np.zeros(tail_len)
             tail_stack = []
-            for w, i in zip(weights, top_k):
-                t = db_y[i][m_obs:m_obs + tail_len]
+            for w, i in zip(weights, sel_idx):
+                t = db_local[i]['y_norm'][m_obs:m_obs + tail_len]
                 if len(t) < tail_len:
                     t = np.pad(t, (0, tail_len - len(t)), mode='edge')
                 tail_pred  += w * t
@@ -937,42 +1000,31 @@ def validate_extrapolation(
             actual_tail = y_full[m_obs:]
             mae = float(np.mean(np.abs(tail_pred - actual_tail)))
 
-            # EOS em fração normalizada (onde v ≤ 0.25)
-            def _eos_frac(arr):
-                for ii, v in enumerate(arr):
-                    if v <= 0.25:
-                        return (m_obs + ii) / n_pts
-                return 1.0
-
-            eos_actual = _eos_frac(actual_tail)
-            # Para predicted: w-dur ponderado (em fração de dur_target)
-            w_dur = float(sum(weights[j] * db_m[i]['cycle_length_days']
-                              for j, i in enumerate(top_k)))
-
-            def _eos_frac_pred(arr, tau_obs, w_dur, dur_ref):
-                """EOS em fração de dur_ref a partir do prefixo."""
-                for ii, v in enumerate(arr):
-                    if v <= 0.25:
-                        # tempo absoluto estimado: tau*dur_ref + (ii/tail_len)*(1-tau)*w_dur
-                        t_abs = tau_obs * dur_ref + (ii / max(tail_len, 1)) * (1 - tau_obs) * w_dur
-                        return t_abs / dur_ref
-                return None
-
-            eos_pred  = _eos_frac_pred(tail_pred, tau, w_dur, dur_target)
-            eos_err   = abs(eos_pred - eos_actual) * dur_target if eos_pred else None
+            # EOS em dias a partir do início do ciclo
+            eos_actual_days = _eos_days(actual_tail, m_obs, n_pts, dur_target, tau, dur_target)
+            w_dur = float(sum(w * db_local[i]['dur_days'] for w, i in zip(weights, sel_idx)))
+            eos_pred_days   = _eos_days(tail_pred,   m_obs, n_pts, dur_target, tau, w_dur)
+            eos_err = abs(eos_pred_days - eos_actual_days) if (eos_pred_days and eos_actual_days) else None
 
             cycle_res['truncations'].append({
-                'tau':          tau,
-                'm_obs':        m_obs,
-                'pred_tail':    tail_pred,
-                'pred_std':     tail_std,
-                'actual_tail':  actual_tail,
-                'matched':      [{'cycle_num': db_m[i]['cycle_num'],
-                                  'dist': round(dists[i], 4),
-                                  'weight': round(float(weights[j]), 4)}
-                                 for j, i in enumerate(top_k)],
-                'mae':          round(mae, 4),
-                'eos_error_days': round(eos_err, 1) if eos_err is not None else None,
+                'tau':             tau,
+                'm_obs':           m_obs,
+                'pred_tail':       tail_pred,
+                'pred_std':        tail_std,
+                'actual_tail':     actual_tail,
+                'n_used':          n_used,
+                'n_outliers_removed': n_removed,
+                'matched': [
+                    {
+                        'cycle_num':   db_local[i]['cycle_num'],
+                        'season_type': db_local[i]['season_type'],
+                        'dist':        round(float(all_dists[i]), 4),
+                        'weight':      round(float(weights[j]), 4),
+                    }
+                    for j, i in enumerate(sel_idx)
+                ],
+                'mae':              round(mae, 4),
+                'eos_error_days':   round(eos_err, 1) if eos_err is not None else None,
             })
 
         results.append(cycle_res)

@@ -55,7 +55,7 @@ def load_cultura(cultura):
     return df, col
 
 
-def run_hex(hex_id, grp, col, cultura, k=3):
+def run_hex(hex_id, grp, col, cultura, iqr_factor=1.5):
     grp = grp.sort_values("data")
     ts = grp.rename(columns={"data": "datetime", col: "NDVI_mean"})[["datetime", "NDVI_mean"]]
     min_days = MIN_CYCLE_DAYS.get(cultura, 90)
@@ -73,8 +73,8 @@ def run_hex(hex_id, grp, col, cultura, k=3):
     dates_arr = ts["datetime"].values
     smooth    = adaptive_smoothing(ndvi_arr, dates_arr, method="both")
 
-    val = validate_extrapolation(res["cycles"], k=k)
-    extrap = extrapolate_terminal_cycle(smooth, dates_arr, res["cycles"], k=k)
+    val    = validate_extrapolation(res["cycles"], iqr_factor=iqr_factor)
+    extrap = extrapolate_terminal_cycle(smooth, dates_arr, res["cycles"], iqr_factor=iqr_factor)
 
     return res, val, smooth, ndvi_arr, dates_arr, extrap
 
@@ -120,10 +120,9 @@ def plot_validation(hex_id, res, val, smooth, ndvi_arr, dates_arr, extrap, cultu
         cstd   = np.array(c_info["std"])
         is_fc  = np.array(c_info["is_forecast"])
 
-        # trecho observado do ciclo terminal
         ax0.plot(cdates[~is_fc], cvals[~is_fc], color="orange", lw=2.5, alpha=0.9, label="Terminal observado")
-        # trecho extrapolado
-        ax0.plot(cdates[is_fc],  cvals[is_fc],  color="orange", lw=2.5, ls="--", label=f"Extrap. k={extrap['k_matched']}")
+        ax0.plot(cdates[is_fc],  cvals[is_fc],  color="orange", lw=2.5, ls="--",
+                 label=f"Extrap. n={extrap['n_cycles_used']} (-{extrap['n_outliers_removed']} outliers)")
         ax0.fill_between(cdates[is_fc],
                          cvals[is_fc] - cstd[is_fc],
                          cvals[is_fc] + cstd[is_fc],
@@ -131,9 +130,11 @@ def plot_validation(hex_id, res, val, smooth, ndvi_arr, dates_arr, extrap, cultu
         ax0.axvline(extrap["series_end_date"],   color="gray",   ls=":",  lw=1.5, label="Fim da série")
         ax0.axvline(extrap["forecast_eos_date"], color="orange", ls=":",  lw=1.5,
                     label=f"EOS previsto ({str(extrap['forecast_eos_date'])[:10]})")
-        tau = extrap["tau_obs"]
-        ax0.set_title(f"{hex_id} · {cultura} · extrap τ_obs={tau:.0%} · "
-                      f"incerteza={extrap['uncertainty_days']:.0f}d", fontsize=10, fontweight="bold")
+        tau   = extrap["tau_obs"]
+        stype = extrap.get("season_type_filter") or "todos"
+        ax0.set_title(f"{hex_id} · {cultura} · τ_obs={tau:.0%} · "
+                      f"season_type={stype} · incerteza={extrap['uncertainty_days']:.0f}d",
+                      fontsize=10, fontweight="bold")
     else:
         reason = extrap.get("reason", "?") if extrap else "N/A"
         ax0.set_title(f"{hex_id} · {cultura} · sem extrap ({reason})", fontsize=10)
@@ -163,8 +164,9 @@ def plot_validation(hex_id, res, val, smooth, ndvi_arr, dates_arr, extrap, cultu
             ax.plot(t_full[:m_obs], y_full[:m_obs], color=col_t, lw=3, alpha=0.5)
             # Cauda prevista
             t_tail = np.linspace(m_obs / n_pts, 1, len(tr["pred_tail"]))
+            n_info = f"n={tr.get('n_used','?')} (-{tr.get('n_outliers_removed', 0)})"
             ax.plot(t_tail, tr["pred_tail"], color=col_t, ls="--", lw=2,
-                    label=f"τ={tau:.0%}  MAE={tr['mae']:.3f}  ΔEOS={tr['eos_error_days'] or '?'}d")
+                    label=f"τ={tau:.0%}  MAE={tr['mae']:.3f}  ΔEOS={tr['eos_error_days'] or '?'}d  {n_info}")
             ax.fill_between(t_tail,
                             tr["pred_tail"] - tr["pred_std"],
                             tr["pred_tail"] + tr["pred_std"],
@@ -189,11 +191,11 @@ def plot_validation(hex_id, res, val, smooth, ndvi_arr, dates_arr, extrap, cultu
 
 
 def main():
-    cultura  = sys.argv[1] if len(sys.argv) > 1 else "soja"
-    n_hex    = int(sys.argv[2]) if len(sys.argv) > 2 else 5
-    seed     = int(sys.argv[3]) if len(sys.argv) > 3 else 42
-    prefix   = sys.argv[4] if len(sys.argv) > 4 else "valida"
-    k_nn     = int(sys.argv[5]) if len(sys.argv) > 5 else 3
+    cultura    = sys.argv[1] if len(sys.argv) > 1 else "soja"
+    n_hex      = int(sys.argv[2]) if len(sys.argv) > 2 else 5
+    seed       = int(sys.argv[3]) if len(sys.argv) > 3 else 42
+    prefix     = sys.argv[4] if len(sys.argv) > 4 else "valida"
+    iqr_factor = float(sys.argv[5]) if len(sys.argv) > 5 else 1.5
 
     # suporte a --hexagonos hex1,hex2,...
     forced_hexes = []
@@ -220,7 +222,7 @@ def main():
     for hex_id in sample:
         print(f"\n{hex_id}", flush=True)
         grp = df[df["id_hexagono"] == hex_id]
-        out = run_hex(hex_id, grp, col, cultura, k=k_nn)
+        out = run_hex(hex_id, grp, col, cultura, iqr_factor=iqr_factor)
         if out[0] is None:
             print("  sem picos detectados")
             continue
@@ -235,8 +237,10 @@ def main():
             for cr in val["results"]:
                 for tr in cr["truncations"]:
                     eos_e = tr["eos_error_days"]
+                    n_u = tr.get("n_used", "?")
+                    n_r = tr.get("n_outliers_removed", 0)
                     print(f"    ciclo {cr['cycle_num']} τ={tr['tau']:.0%}: "
-                          f"MAE={tr['mae']:.3f}  ΔEOS={eos_e}d")
+                          f"MAE={tr['mae']:.3f}  ΔEOS={eos_e}d  [n={n_u} -out={n_r}]")
 
         out_path = OUT_DIR / f"{prefix}_{cultura}_{hex_id}.png"
         plot_validation(hex_id, res, val, smooth, ndvi_arr, dates_arr, extrap, cultura, out_path)
