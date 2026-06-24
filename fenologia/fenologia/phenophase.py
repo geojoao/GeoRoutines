@@ -516,8 +516,12 @@ def fit_curve_to_cycle(ndvi_values: np.ndarray, dates: np.ndarray, cycle: Dict[s
     days_since_start = np.array([(d - dates_cycle[0]) / np.timedelta64(1, 'D')
                                   for d in dates_cycle], dtype=float)
 
-    amplitude_init = float(np.max(ndvi_cycle) - np.min(ndvi_cycle))
-    offset_init    = float(np.min(ndvi_cycle))
+    # Baseline ancorado no mínimo global da série (solo exposto):
+    # offset é livre mas tem lower_bound = series_min para que a curva
+    # nunca fique abaixo do nível de solo observado.
+    series_min     = float(np.min(ndvi_values))
+    amplitude_init = float(np.max(ndvi_cycle)) - series_min
+    offset_init    = max(series_min, float(np.min(ndvi_cycle)))
     window_len     = float(days_since_start[-1] - days_since_start[0])
 
     peak_pos_idx  = int(np.argmax(ndvi_cycle))
@@ -540,8 +544,8 @@ def fit_curve_to_cycle(ndvi_values: np.ndarray, dates: np.ndarray, cycle: Dict[s
     # m1 e m2 podem estar fora da janela visível (séries truncadas nas bordas):
     # permite extrapolação de até 50% do comprimento da janela para cada lado.
     slack = window_len * 0.5
-    lower_bounds = [0.01, -slack,           0.005, peak_pos_days, 0.005, -0.5]
-    upper_bounds = [1.5,  peak_pos_days,    2.0,   window_len + slack, 2.0, float(np.max(ndvi_cycle))]
+    lower_bounds = [0.01, -slack,        0.005, peak_pos_days, 0.005, series_min]
+    upper_bounds = [1.5,  peak_pos_days, 2.0,   window_len + slack, 2.0, float(np.max(ndvi_cycle))]
 
     for i in range(len(initial_guess)):
         initial_guess[i] = float(np.clip(initial_guess[i], lower_bounds[i], upper_bounds[i]))
@@ -568,12 +572,12 @@ def fit_curve_to_cycle(ndvi_values: np.ndarray, dates: np.ndarray, cycle: Dict[s
         y_dense   = double_logistic(t_dense, *popt)
         pos_days  = float(t_dense[int(np.argmax(y_dense))])
 
-        # SOS/EOS analíticos:
-        #   L_rise = 0.25  →  t = m1 - ln(3)/k1
-        #   L_fall = 0.25  →  t = m2 + ln(3)/k2
-        _ln3    = float(np.log(3))
-        sos_days = m1 - _ln3 / k1
-        eos_days = m2 + _ln3 / k2
+        # SOS/EOS analíticos com limiar de 10% da amplitude:
+        #   L_rise = 0.10  →  t = m1 - ln(9)/k1
+        #   L_fall = 0.10  →  t = m2 + ln(9)/k2
+        _ln9     = float(np.log(9))
+        sos_days = m1 - _ln9 / k1
+        eos_days = m2 + _ln9 / k2
 
         # Calcula R² nos dados observados
         residuals = ndvi_cycle - double_logistic(days_since_start, *popt)
@@ -903,7 +907,7 @@ def validate_extrapolation(
         k2_lo     = min(prior_k2 + float(np.std(k2_vals)), 0.5)
         k2_hi     = max(prior_k2 - float(np.std(k2_vals)), 0.005)
 
-        eos_threshold = offset + 0.20 * amplitude
+        eos_threshold = offset + 0.10 * amplitude
         t_max   = m2_est + 4.0 / prior_k2 + 30.0
         t_dense = np.linspace(0.0, t_max, max(int(t_max) + 1, 200))
         y_central = double_logistic(t_dense, amplitude, m1, k1, m2_est, prior_k2, offset)
