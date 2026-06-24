@@ -544,8 +544,10 @@ def fit_curve_to_cycle(ndvi_values: np.ndarray, dates: np.ndarray, cycle: Dict[s
     # m1 e m2 podem estar fora da janela visível (séries truncadas nas bordas):
     # permite extrapolação de até 50% do comprimento da janela para cada lado.
     slack = window_len * 0.5
-    lower_bounds = [0.01, -slack,        0.005, peak_pos_days, 0.005, series_min]
-    upper_bounds = [1.5,  peak_pos_days, 2.0,   window_len + slack, 2.0, float(np.max(ndvi_cycle))]
+    # k_max: transição 10%→90% em ln(81)/k_max dias; 0.3 day⁻¹ → ~15 dias mínimos
+    _k_max = 0.3
+    lower_bounds = [0.01, -slack,        0.005,   peak_pos_days, 0.005,   series_min]
+    upper_bounds = [1.5,  peak_pos_days, _k_max,  window_len + slack, _k_max, float(np.max(ndvi_cycle))]
 
     for i in range(len(initial_guess)):
         initial_guess[i] = float(np.clip(initial_guess[i], lower_bounds[i], upper_bounds[i]))
@@ -663,8 +665,8 @@ def _bank_quality_ok(c: Dict, min_r2: float = 0.70) -> bool:
     m1_ = float(cp.get('m1', 0))
     m2_ = float(cp.get('m2', 0))
     if not (0.05 < amp < 1.1):   return False
-    if not (0.005 < k2  < 0.5):  return False
-    if not (0.005 < k1  < 0.5):  return False
+    if not (0.005 < k2  < 0.3):  return False
+    if not (0.005 < k1  < 0.3):  return False
     if m2_ <= m1_:               return False
     pd_   = c.get('phenophase_days', {})
     p_d   = float(pd_.get('pos_days', 0))
