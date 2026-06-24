@@ -701,8 +701,8 @@ def extrapolate_terminal_cycle(
       6. Gera banda de incerteza (±1 std de half_right).
 
     Args:
-        ndvi_smooth   : EVI suavizado (aceito para compatibilidade, não usado no cálculo)
-        dates         : array np.datetime64 — usado apenas para series_end_date
+        ndvi_smooth   : EVI suavizado da série completa — usado para detectar se a descida iniciou
+        dates         : array np.datetime64 — alinhado com ndvi_smooth
         fitted_cycles : lista de cycles de extract_phenometrics()
         min_bank      : mínimo de ciclos válidos no banco (padrão 1)
         min_r2_bank   : R² mínimo para aceitar um ciclo no banco (padrão 0.70)
@@ -736,7 +736,24 @@ def extrapolate_terminal_cycle(
     pos_days  = float(terminal['phenophase_days']['pos_days'])
     term_season = terminal.get('season_type')
 
-    peak_was_observed = (pos_days <= obs_days)
+    # ── Detecção de fase: descida já iniciou? ───────────────────────────────
+    # Usa os dados observados do ciclo terminal em vez do pos_days do fit
+    # (que pode ser impreciso para séries truncadas na subida).
+    t0_idx  = int(np.searchsorted(dates, np.datetime64(terminal['cycle_start'])))
+    obs_evi = ndvi_smooth[t0_idx:].astype(float)
+
+    if len(obs_evi) >= 5:
+        argmax    = int(np.argmax(obs_evi))
+        n_obs     = len(obs_evi)
+        obs_span  = float(obs_evi.max() - obs_evi.min()) + 1e-9
+        drop_frac = float(obs_evi.max() - obs_evi[-1]) / obs_span
+        # Descida iniciou se pico não está nas últimas 2 observações
+        # E houve queda de >8 % do span observado (robusto a ruído MODIS ~8 dias)
+        peak_was_observed = (argmax < n_obs - 2) and (drop_frac > 0.08)
+        peak_detection    = 'data_driven'
+    else:
+        peak_was_observed = (pos_days <= obs_days)
+        peak_detection    = 'fit_based'
 
     # ── 2. Banco de priors ───────────────────────────────────────────────────
     bank = _build_bank(fitted_cycles, term_season, min_r2_bank, min_bank)
@@ -754,12 +771,15 @@ def extrapolate_terminal_cycle(
 
     # ── 3. Caso pico não observado: prior para POS e amplitude ──────────────
     forecast_pos_date: Optional[pd.Timestamp] = None
+    prior_pos_ndvi: Optional[float] = None
     if not peak_was_observed:
-        pos_off_vals = [float(c['phenophase_days']['pos_days']) - float(c['curve_params']['m1'])
-                        for c in bank]
-        amp_vals     = [float(c['curve_params']['amplitude']) for c in bank]
-        pos_days  = m1 + float(np.median(pos_off_vals))
-        amplitude = float(np.median(amp_vals))
+        pos_off_vals  = [float(c['phenophase_days']['pos_days']) - float(c['curve_params']['m1'])
+                         for c in bank]
+        pos_ndvi_vals = [float(c['phenophase_values']['pos_ndvi']) for c in bank]
+        pos_days      = m1 + float(np.median(pos_off_vals))
+        # Usa nível absoluto de EVI no pico como prior (mais estável que amplitude paramétrica)
+        prior_pos_ndvi = float(np.median(pos_ndvi_vals))
+        amplitude      = max(prior_pos_ndvi - offset, 0.05)
         forecast_pos_date = t0 + pd.Timedelta(days=pos_days)
 
     # ── 4. Reconstrução logística com prior de descida ───────────────────────
@@ -800,6 +820,8 @@ def extrapolate_terminal_cycle(
             'half_right_std':    round(prior_half_r_std, 1),
         },
         'peak_was_observed':  peak_was_observed,
+        'peak_detection':     peak_detection,
+        'prior_pos_ndvi':     round(prior_pos_ndvi, 3) if prior_pos_ndvi is not None else None,
         'forecast_pos_date':  forecast_pos_date,
         'series_end_date':    series_end,
         'forecast_eos_date':  forecast_eos,
