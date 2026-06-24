@@ -687,6 +687,96 @@ def _build_bank(fitted_cycles: List[Dict],
     return bank if len(bank) >= min_bank else None
 
 
+def _detect_rising_end(
+    ndvi_smooth: np.ndarray,
+    dates: np.ndarray,
+    fitted_cycles: List[Dict],
+    min_rise_fraction: float = 0.12,
+    min_seg_days: float = 20.0,
+) -> Optional[Dict]:
+    """
+    Detecta segmento em subida ao final da série e ajusta um ciclo terminal sintético.
+
+    Chamada quando nenhum ciclo com at_series_end=True existe. Verifica se o EVI
+    suavizado sobe significativamente desde o último vale pós-ciclo até o final.
+    Se sim, tenta ajustar uma logística dupla ao segmento (threshold de qualidade=0.0,
+    aceitando qualquer fit não-degenerado). Retorna dict compatível com
+    extrapolate_terminal_cycle, ou None se a subida não for detectada ou o fit falhar.
+
+    O parâmetros m1/k1 do fit capturam a taxa de subida observada; k2/m2 são
+    imprecisos (descida não observada) e serão substituídos pelos priors do banco.
+    """
+    n = len(ndvi_smooth)
+    if n < 10:
+        return None
+
+    # ── Onde o último ciclo BEM-SUCEDIDO terminou ────────────────────────────
+    # Ignora ciclos terminais com fit falho: eles cobrem o final da série mas
+    # não têm parâmetros confiáveis, e não podem ser usados como fronteira.
+    last_end_idx = 0
+    for c in reversed(fitted_cycles):
+        if c.get('fit_success'):
+            end_ts = pd.Timestamp(c['cycle_end'])
+            idx = int(np.searchsorted(dates, np.datetime64(end_ts), side='left'))
+            last_end_idx = max(0, min(idx, n - 1))
+            break
+
+    # ── Encontra o vale mais baixo no início do segmento trailing ────────────
+    trailing = ndvi_smooth[last_end_idx:]
+    if len(trailing) < 8:
+        return None
+
+    # Procura mínimo nos primeiros 60 % do segmento trailing
+    search_end = max(3, int(len(trailing) * 0.60))
+    trough_rel = int(np.argmin(trailing[:search_end]))
+    trough_idx = last_end_idx + trough_rel
+
+    # ── Verifica subida clara do vale ao fim ─────────────────────────────────
+    seg_days = float((dates[-1] - dates[trough_idx]) / np.timedelta64(1, 'D'))
+    segment  = ndvi_smooth[trough_idx:]
+    if seg_days < min_seg_days or len(segment) < 5:
+        return None
+
+    series_rng = float(ndvi_smooth.max() - ndvi_smooth.min()) + 1e-9
+    rise_abs   = float(segment[-1] - segment[0])
+    rise_frac  = rise_abs / series_rng
+    if rise_frac < min_rise_fraction:
+        return None
+
+    # Confirma tendência positiva (regressão linear)
+    x     = np.arange(len(segment), dtype=float)
+    slope = float(np.polyfit(x, segment.astype(float), 1)[0])
+    if slope <= 0:
+        return None
+
+    # ── Tenta fit da logística dupla no segmento ────────────────────────────
+    cycle_num = len(fitted_cycles) + 1
+    cycle_dict = {
+        'cycle_num':   cycle_num,
+        'start_idx':   int(trough_idx),
+        'end_idx':     int(n - 1),
+        'start_date':  pd.Timestamp(dates[trough_idx]),
+        'end_date':    pd.Timestamp(dates[-1]),
+        'length_days': seg_days,
+        'min_ndvi':    float(np.min(segment)),
+        'max_ndvi':    float(np.max(segment)),
+        'at_series_start': False,
+        'at_series_end':   True,
+        'peak_idx':    int(trough_idx + int(np.argmax(segment))),
+    }
+
+    # quality_threshold=0.0: aceita qualquer fit não-degenerado.
+    # Para segmento só com subida, m2/k2 serão mal constrainados — isso é
+    # esperado e não importa, pois serão substituídos pelos priors do banco.
+    result = fit_curve_to_cycle(ndvi_smooth, dates, cycle_dict, quality_threshold=0.0)
+    if not result.get('fit_success'):
+        return None
+
+    result['at_series_end']    = True
+    result['_synthetic_rising'] = True
+    return result
+
+
 def extrapolate_terminal_cycle(
     ndvi_smooth: np.ndarray,
     dates: np.ndarray,
@@ -727,9 +817,18 @@ def extrapolate_terminal_cycle(
             break
 
     if terminal is None:
-        return {'success': False, 'reason': 'Nenhum ciclo em andamento ao final da série'}
+        # Série pode estar terminando na subida antes do pico: tenta detectar
+        terminal = _detect_rising_end(ndvi_smooth, dates, fitted_cycles)
+        if terminal is None:
+            return {'success': False, 'reason': 'Nenhum ciclo em andamento ao final da série'}
     if not terminal.get('fit_success'):
-        return {'success': False, 'reason': 'Ciclo terminal sem fit logístico válido'}
+        # Ciclo terminal detectado mas fit falhou (R² baixo ou segmento degenerado).
+        # Tenta construir ciclo sintético a partir da subida observada.
+        alt = _detect_rising_end(ndvi_smooth, dates, fitted_cycles)
+        if alt is not None:
+            terminal = alt
+        else:
+            return {'success': False, 'reason': 'Ciclo terminal sem fit logístico válido'}
 
     cp         = terminal['curve_params']
     t0         = pd.Timestamp(terminal['cycle_start'])
