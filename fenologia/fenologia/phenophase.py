@@ -693,6 +693,7 @@ def _detect_rising_end(
     fitted_cycles: List[Dict],
     min_rise_fraction: float = 0.12,
     min_seg_days: float = 20.0,
+    max_lookback_days: float = 400.0,
 ) -> Optional[Dict]:
     """
     Detecta segmento em subida ao final da série e ajusta um ciclo terminal sintético.
@@ -705,10 +706,16 @@ def _detect_rising_end(
 
     O parâmetros m1/k1 do fit capturam a taxa de subida observada; k2/m2 são
     imprecisos (descida não observada) e serão substituídos pelos priors do banco.
+
+    max_lookback_days limita o horizonte de busca do vale a partir do final da
+    série, evitando criar ciclos sintéticos que abranjam anos inteiros quando há
+    um longo hiato entre o último ciclo completo e a safra atual.
     """
     n = len(ndvi_smooth)
     if n < 10:
         return None
+
+    total_days = float((dates[-1] - dates[0]) / np.timedelta64(1, 'D')) + 1e-9
 
     # ── Onde o último ciclo BEM-SUCEDIDO terminou ────────────────────────────
     # Ignora ciclos terminais com fit falho: eles cobrem o final da série mas
@@ -721,15 +728,21 @@ def _detect_rising_end(
             last_end_idx = max(0, min(idx, n - 1))
             break
 
-    # ── Encontra o vale mais baixo no início do segmento trailing ────────────
-    trailing = ndvi_smooth[last_end_idx:]
+    # ── Janela de busca: não retrocede mais que max_lookback_days ────────────
+    # Se a série tem um longo gap sem ciclos completos (e.g. 3 anos), usar o
+    # índice do último ciclo como início criaria um segmento de anos inteiros,
+    # causando uma curva prevista totalmente desconexa do pico atual.
+    lookback_pts  = max(8, int(max_lookback_days * n / total_days))
+    search_start  = max(last_end_idx, n - lookback_pts)
+
+    trailing = ndvi_smooth[search_start:]
     if len(trailing) < 8:
         return None
 
-    # Procura mínimo nos primeiros 60 % do segmento trailing
+    # Procura mínimo nos primeiros 60 % do segmento de busca
     search_end = max(3, int(len(trailing) * 0.60))
     trough_rel = int(np.argmin(trailing[:search_end]))
-    trough_idx = last_end_idx + trough_rel
+    trough_idx = search_start + trough_rel
 
     # ── Verifica subida clara do vale ao fim ─────────────────────────────────
     seg_days = float((dates[-1] - dates[trough_idx]) / np.timedelta64(1, 'D'))
@@ -909,6 +922,16 @@ def extrapolate_terminal_cycle(
         if ti > obs_days and yi <= eos_threshold:
             forecast_eos = t0 + pd.Timedelta(days=float(ti))
             break
+
+    # ── 5b. Ancora visual ao EVI observado no final da série ─────────────────
+    # Desloca a curva de previsão para que a junção em "Hoje" seja contínua:
+    # y_model(obs_days) → ndvi_smooth[-1].  A data de EOS é invariante porque
+    # curva e threshold mudam pela mesma constante aditiva.
+    y_at_obs   = float(np.interp(obs_days, t_dense, y_central))
+    anchor_off = float(ndvi_smooth[-1]) - y_at_obs
+    y_central  = y_central + anchor_off
+    y_upper    = y_upper   + anchor_off
+    y_lower    = y_lower   + anchor_off
 
     # ── 6. Output ─────────────────────────────────────────────────────────────
     dates_out   = [t0 + pd.Timedelta(days=float(ti)) for ti in t_dense]
