@@ -155,7 +155,10 @@ def api_cycles(hex_id: str, cultura: str):
     if cache_key in _cycles_cache:
         return JSONResponse(_cycles_cache[cache_key])
 
-    from fenologia.phenophase import extract_phenometrics, adaptive_smoothing, double_logistic
+    from fenologia.phenophase import (
+        extract_phenometrics, adaptive_smoothing, double_logistic,
+        extrapolate_terminal_cycle,
+    )
 
     col = f"evi_medio_{cultura}"
     if hex_id not in _ts.index:
@@ -239,6 +242,27 @@ def api_cycles(hex_id: str, cultura: str):
             "eos": {"date": str(ph["eos"])[:10], "val": round(float(pv["eos_ndvi"]), 4)},
         })
 
+    # Extrapolação do pico terminal em andamento (se existir)
+    extrap_raw = extrapolate_terminal_cycle(ndvi_smooth, dates_arr, result.get("cycles", []))
+    if extrap_raw.get("success"):
+        cv      = extrap_raw["curve"]
+        fc_idx  = [i for i, f in enumerate(cv["is_forecast"]) if f]
+        extrap_out: dict = {
+            "success":            True,
+            "curve_dates":        [cv["dates"][i]         for i in fc_idx],
+            "curve_vals":         [cv["values"][i]        for i in fc_idx],
+            "curve_upper":        [cv["values_upper"][i]  for i in fc_idx],
+            "curve_lower":        [cv["values_lower"][i]  for i in fc_idx],
+            "forecast_eos_date":  str(extrap_raw["forecast_eos_date"])[:10],
+            "series_end_date":    str(extrap_raw["series_end_date"])[:10],
+            "uncertainty_days":   extrap_raw["uncertainty_days"],
+            "peak_was_observed":  extrap_raw["peak_was_observed"],
+            "n_prior_cycles":     extrap_raw["n_prior_cycles"],
+            "season_type_filter": extrap_raw.get("season_type_filter"),
+        }
+    else:
+        extrap_out = {"success": False, "reason": extrap_raw.get("reason", "")}
+
     # Médias fenológicas do hexágono (circular mean de todos os ciclos detectados)
     mean_rows = _pheno[
         (_pheno["id_hexagono"] == hex_id) & (_pheno["cultura"] == cultura)
@@ -262,6 +286,7 @@ def api_cycles(hex_id: str, cultura: str):
         "smooth":           [round(float(v), 4) for v in ndvi_smooth],
         "cycles":           cycles_out,
         "mean_phenophases": mean_phenophases,
+        "extrap":           extrap_out,
     }
     _cycles_cache[cache_key] = out
     return JSONResponse(out)

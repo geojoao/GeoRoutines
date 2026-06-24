@@ -559,6 +559,13 @@ function renderPills() {
     });
   }
   if (tsKnn) el.innerHTML += `<span class="pill pill-knn">KNN</span>`;
+  const ext = tsData.extrap;
+  if (ext && ext.success) {
+    const eosFmt = ext.forecast_eos_date.slice(5).replace("-", "/");
+    el.innerHTML +=
+      `<span class="pill" style="background:rgba(255,140,0,0.12);color:darkorange;border:1px solid darkorange">` +
+      `EOS prev. ${eosFmt} ±${ext.uncertainty_days}d · prior=${ext.n_prior_cycles} ciclos</span>`;
+  }
 }
 
 function renderChart() {
@@ -650,6 +657,69 @@ function renderChart() {
         backgroundColor: "rgba(13,17,23,0.85)", padding: { x: 4, y: 2 }, borderRadius: 3,
       };
     });
+
+    // ── Extrapolação do pico terminal em andamento ────────────────────────
+    const ext = data.extrap;
+    if (ext && ext.success && ext.curve_dates.length > 0) {
+      // Banda de incerteza: lower primeiro, upper com fill: '-1'
+      datasets.push({
+        label: "_ext_lower",
+        data: ext.curve_dates.map((d, i) => ({ x: d, y: ext.curve_lower[i] })),
+        borderColor: "transparent",
+        backgroundColor: "transparent",
+        pointRadius: 0,
+        fill: false,
+        order: 0,
+      });
+      datasets.push({
+        label: "_ext_upper",
+        data: ext.curve_dates.map((d, i) => ({ x: d, y: ext.curve_upper[i] })),
+        borderColor: "transparent",
+        backgroundColor: "rgba(255,140,0,0.15)",
+        pointRadius: 0,
+        fill: "-1",
+        order: 0,
+      });
+      // Curva central prevista (tracejado laranja)
+      datasets.push({
+        label: "EOS estimado",
+        data: ext.curve_dates.map((d, i) => ({ x: d, y: ext.curve_vals[i] })),
+        borderColor: "darkorange",
+        backgroundColor: "transparent",
+        borderWidth: 2.5,
+        borderDash: [7, 4],
+        pointRadius: 0,
+        tension: 0.2,
+        fill: false,
+        order: 0,
+      });
+
+      // Linha vertical no fim da série observada
+      annotations["ext_series_end"] = {
+        type: "line",
+        xMin: ext.series_end_date, xMax: ext.series_end_date,
+        borderColor: "rgba(160,160,160,0.55)", borderWidth: 1.5, borderDash: [4, 4],
+        label: {
+          display: true, content: "Hoje",
+          position: "end", yAdjust: 20,
+          color: "#aaa", font: { size: 9 },
+          backgroundColor: "rgba(13,17,23,0.8)", padding: { x: 3, y: 1 },
+        },
+      };
+      // Linha vertical no EOS previsto (laranja)
+      annotations["ext_eos_forecast"] = {
+        type: "line",
+        xMin: ext.forecast_eos_date, xMax: ext.forecast_eos_date,
+        borderColor: "darkorange", borderWidth: 2, borderDash: [6, 3],
+        label: {
+          display: true,
+          content: `EOS prev. ±${ext.uncertainty_days}d`,
+          position: "end", yAdjust: 42,
+          color: "darkorange", font: { size: 9, weight: "bold" },
+          backgroundColor: "rgba(13,17,23,0.85)", padding: { x: 3, y: 1 },
+        },
+      };
+    }
 
   } else {
     // ── Modo médio: linhas repetidas a cada ano ────────────────────────────
