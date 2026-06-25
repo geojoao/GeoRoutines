@@ -855,6 +855,9 @@ def extrapolate_terminal_cycle(
     pos_days  = float(terminal['phenophase_days']['pos_days'])
     term_season = terminal.get('season_type')
 
+    # Nível mínimo global da série = nível de solo exposto (bare soil baseline)
+    series_min_global = float(np.min(ndvi_smooth))
+
     # ── Detecção de fase: descida já iniciou? ───────────────────────────────
     # Usa os dados observados do ciclo terminal em vez do pos_days do fit
     # (que pode ser impreciso para séries truncadas na subida).
@@ -896,10 +899,18 @@ def extrapolate_terminal_cycle(
                          for c in bank]
         pos_ndvi_vals = [float(c['phenophase_values']['pos_ndvi']) for c in bank]
         pos_days      = m1 + float(np.median(pos_off_vals))
-        # Usa nível absoluto de EVI no pico como prior (mais estável que amplitude paramétrica)
         prior_pos_ndvi = float(np.median(pos_ndvi_vals))
-        amplitude      = max(prior_pos_ndvi - offset, 0.05)
         forecast_pos_date = t0 + pd.Timedelta(days=pos_days)
+
+    # ── 3b. Força offset = solo exposto; recalcula amplitude preservando pico ─
+    # peak_level: EVI estimado no pico (observado ou via prior histórico)
+    if peak_was_observed:
+        peak_level = offset + amplitude           # nível absoluto do pico do fit
+    else:
+        peak_level = prior_pos_ndvi               # prior do banco (nível absoluto)
+    # O offset da logística de previsão é sempre o mínimo global da série
+    offset_fc  = series_min_global
+    amplitude  = max(float(peak_level) - offset_fc, 0.05)
 
     # ── 4. Reconstrução logística com prior de descida ───────────────────────
     m2_est    = pos_days + prior_half_r
@@ -908,30 +919,35 @@ def extrapolate_terminal_cycle(
     k2_lo     = min(prior_k2 + prior_k2_std, 0.5)
     k2_hi     = max(prior_k2 - prior_k2_std, 0.005)
 
-    eos_threshold = offset + 0.20 * amplitude
+    eos_threshold = offset_fc + 0.20 * amplitude
     t_max   = m2_est + 4.0 / prior_k2 + 30.0
     t_dense = np.linspace(0.0, t_max, max(int(t_max) + 1, 200))
 
-    y_central = double_logistic(t_dense, amplitude, m1, k1, m2_est,    prior_k2, offset)
-    y_upper   = double_logistic(t_dense, amplitude, m1, k1, m2_est_hi, k2_hi,    offset)
-    y_lower   = double_logistic(t_dense, amplitude, m1, k1, m2_est_lo, k2_lo,    offset)
+    y_central = double_logistic(t_dense, amplitude, m1, k1, m2_est,    prior_k2, offset_fc)
+    y_upper   = double_logistic(t_dense, amplitude, m1, k1, m2_est_hi, k2_hi,    offset_fc)
+    y_lower   = double_logistic(t_dense, amplitude, m1, k1, m2_est_lo, k2_lo,    offset_fc)
 
-    # ── 5. EOS forecast ──────────────────────────────────────────────────────
+    # ── 5b. Ancora visual com decaimento exponencial ──────────────────────────
+    # Conecta suavemente ao EVI observado em "Hoje", mas deixa a curva convergir
+    # ao solo exposto conforme avança no tempo (tau ~ duração da descida).
+    y_at_obs   = float(np.interp(obs_days, t_dense, y_central))
+    anchor_off = float(ndvi_smooth[-1]) - y_at_obs
+    tau_taper  = max(15.0, prior_half_r + 2.0 / prior_k2)
+    taper      = np.where(
+        t_dense >= obs_days,
+        np.exp(-(t_dense - obs_days) / tau_taper),
+        np.zeros(len(t_dense)),
+    )
+    y_central = np.maximum(y_central + anchor_off * taper, series_min_global)
+    y_upper   = np.maximum(y_upper   + anchor_off * taper, series_min_global)
+    y_lower   = np.maximum(y_lower   + anchor_off * taper, series_min_global)
+
+    # ── 5. EOS forecast (calculado após a correção da âncora) ────────────────
     forecast_eos: pd.Timestamp = t0 + pd.Timedelta(days=float(t_dense[-1]))
     for ti, yi in zip(t_dense, y_central):
         if ti > obs_days and yi <= eos_threshold:
             forecast_eos = t0 + pd.Timedelta(days=float(ti))
             break
-
-    # ── 5b. Ancora visual ao EVI observado no final da série ─────────────────
-    # Desloca a curva de previsão para que a junção em "Hoje" seja contínua:
-    # y_model(obs_days) → ndvi_smooth[-1].  A data de EOS é invariante porque
-    # curva e threshold mudam pela mesma constante aditiva.
-    y_at_obs   = float(np.interp(obs_days, t_dense, y_central))
-    anchor_off = float(ndvi_smooth[-1]) - y_at_obs
-    y_central  = y_central + anchor_off
-    y_upper    = y_upper   + anchor_off
-    y_lower    = y_lower   + anchor_off
 
     # ── 6. Output ─────────────────────────────────────────────────────────────
     dates_out   = [t0 + pd.Timedelta(days=float(ti)) for ti in t_dense]
