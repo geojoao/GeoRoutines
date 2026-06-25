@@ -95,7 +95,7 @@ def api_grid(cultura: str, tipo: str):
         features = []
         for _, row in sub.iterrows():
             try:
-                bnd    = h3.cell_to_boundary(row["id_hexagono"])
+                bnd    = h3.h3_to_geo_boundary(row["id_hexagono"])
                 coords = [[lon, lat] for lat, lon in bnd]
                 coords.append(coords[0])   # fecha o polígono
                 features.append({
