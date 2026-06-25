@@ -575,12 +575,12 @@ def fit_curve_to_cycle(ndvi_values: np.ndarray, dates: np.ndarray, cycle: Dict[s
         y_dense   = double_logistic(t_dense, *popt)
         pos_days  = float(t_dense[int(np.argmax(y_dense))])
 
-        # SOS/EOS analíticos com limiar de 10% da amplitude:
-        #   L_rise = 0.10  →  t = m1 - ln(9)/k1
-        #   L_fall = 0.10  →  t = m2 + ln(9)/k2
-        _ln9     = float(np.log(9))
-        sos_days = m1 - _ln9 / k1
-        eos_days = m2 + _ln9 / k2
+        # SOS/EOS analíticos com limiar de 15% da amplitude:
+        #   L_rise = 0.15  →  t = m1 - ln(17/3)/k1
+        #   L_fall = 0.15  →  t = m2 + ln(17/3)/k2
+        _ln_thresh = float(np.log(0.85 / 0.15))   # ≈ 1.7346
+        sos_days = m1 - _ln_thresh / k1
+        eos_days = m2 + _ln_thresh / k2
 
         # Calcula R² nos dados observados
         residuals = ndvi_cycle - double_logistic(days_since_start, *popt)
@@ -919,7 +919,7 @@ def extrapolate_terminal_cycle(
     k2_lo     = min(prior_k2 + prior_k2_std, 0.5)
     k2_hi     = max(prior_k2 - prior_k2_std, 0.005)
 
-    eos_threshold = offset_fc + 0.20 * amplitude
+    eos_threshold = offset_fc + 0.15 * amplitude
     t_max   = m2_est + 4.0 / prior_k2 + 30.0
     t_dense = np.linspace(0.0, t_max, max(int(t_max) + 1, 200))
 
@@ -1048,7 +1048,7 @@ def validate_extrapolation(
         k2_lo     = min(prior_k2 + float(np.std(k2_vals)), 0.5)
         k2_hi     = max(prior_k2 - float(np.std(k2_vals)), 0.005)
 
-        eos_threshold = offset + 0.10 * amplitude
+        eos_threshold = offset + 0.15 * amplitude
         t_max   = m2_est + 4.0 / prior_k2 + 30.0
         t_dense = np.linspace(0.0, t_max, max(int(t_max) + 1, 200))
         y_central = double_logistic(t_dense, amplitude, m1, k1, m2_est, prior_k2, offset)
