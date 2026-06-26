@@ -210,10 +210,40 @@ def extract_pixel_series(
     out_path = output_dir / f"{hex_id}.parquet"
     df.to_parquet(out_path, index=False)
 
-    n_px  = df.groupby(["lon", "lat"]).ngroups
-    n_obs = len(df)
-    log.info(f"Salvo → {out_path}")
-    log.info(f"  {n_px} pixels únicos | {n_obs:,} observações")
+    # ── Resumo final ───────────────────────────────────────────────────────
+    n_px      = df.groupby(["lon", "lat"]).ngroups
+    n_obs     = len(df)
+    n_soja    = df["soja_ano"].sum()
+    evi_stats = df["evi"].describe(percentiles=[.25, .50, .75, .90])
+    px_by_year = (
+        df[df["soja_ano"]]
+        .assign(year=df["data"].dt.year)
+        .groupby("year")[["lon","lat"]]
+        .apply(lambda g: g.drop_duplicates().shape[0])
+    )
+
+    sep = "=" * 60
+    print(f"\n{sep}")
+    print(f"  RESULTADO — extração pixel-level")
+    print(f"  Hexágono : {hex_id}")
+    print(f"  Saída    : {out_path}")
+    print(sep)
+    print(f"  Pixels únicos (soja ∪ todos os anos) : {n_px:>6,}")
+    print(f"  Observações totais                   : {n_obs:>6,}")
+    print(f"  Observações com soja_ano=True        : {n_soja:>6,}  ({100*n_soja/max(n_obs,1):.1f}%)")
+    print(f"  Período   : {str(df['data'].min())[:10]}  →  {str(df['data'].max())[:10]}")
+    print(f"\n  EVI (todos os pixels / datas):")
+    print(f"    mín={evi_stats['min']:.4f}  P25={evi_stats['25%']:.4f}  "
+          f"med={evi_stats['50%']:.4f}  P75={evi_stats['75%']:.4f}  "
+          f"P90={evi_stats['90%']:.4f}  máx={evi_stats['max']:.4f}")
+    print(f"\n  Pixels soja por ano (MapBiomas):")
+    for year, cnt in px_by_year.items():
+        bar = "█" * int(cnt / max(px_by_year.max(), 1) * 30)
+        print(f"    {year}: {cnt:>4}  {bar}")
+    print(f"\n  Para iniciar o dashboard:")
+    print(f"    PIXEL_HEX={hex_id} uvicorn pixel_dashboard.app:app --port 8001")
+    print(sep + "\n")
+
     return out_path
 
 
