@@ -70,6 +70,17 @@ def authenticate() -> "earthaccess.Auth":
     global _AUTH
     if _AUTH is not None and _AUTH.authenticated:
         return _AUTH
+
+    # fsspec.config.conf pode ter uma entrada 'gcs' (gerada pelo gcsfs/MapBiomas).
+    # O earthaccess.open usa fsspec.config.conf como open_kwargs padrão quando
+    # nenhum argumento é passado, o que faz a chave 'gcs' chegar ao filesystem
+    # HTTP e quebrar com TypeError.  Remove antes de autenticar.
+    try:
+        import fsspec.config as _fsc
+        _fsc.conf.pop("gcs", None)
+    except Exception:
+        pass
+
     for strategy in ("environment", "netrc", "interactive"):
         try:
             auth = earthaccess.login(strategy=strategy, persist=True)
