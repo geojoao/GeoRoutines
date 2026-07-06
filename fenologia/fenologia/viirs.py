@@ -7,13 +7,18 @@ Particularidades tratadas aqui:
   depender do driver HDF5 do GDAL (que normalmente NÃO vem nos wheels do
   rasterio), lemos o array com ``h5py`` e montamos a georreferência senoidal a
   partir do ``StructMetadata.0``. Depois reprojetamos para EPSG:4326.
-- Os granules são abertos via ``earthaccess.open`` (S3 direto quando o
-  ambiente está in-region, na mesma AWS region da LP DAAC; HTTPS caso
-  contrário) e copiados para um arquivo temporário só durante a leitura — o
-  arquivo é apagado imediatamente depois. Cada granule aberto gera um log
-  indicando se o acesso foi via S3 ou HTTPS.
+- Os granules são abertos priorizando o **S3 direto** (in-region us-west-2):
+  construímos um ``s3fs`` com credenciais temporárias do Earthdata e abrimos o
+  link ``s3://`` do granule, sem depender da auto-detecção de região do
+  earthaccess (que consulta o IMDS da EC2 e falha em pods Kubernetes, caindo
+  para HTTPS mesmo in-region). O modo é configurável por ``VIIRS_ACCESS_MODE``
+  (``auto``/``s3``/``https``). Cada granule é copiado para um arquivo temporário
+  só durante a leitura — apagado imediatamente depois — e gera um log indicando
+  se o acesso foi via S3 ou HTTPS.
 - Para cobrir um "balde" de tiles, fazemos o mosaico (``combine_first``) dos
-  tiles da mesma data de composição já reprojetados para o grid do balde.
+  tiles da mesma data de composição já reprojetados para o grid do balde. O
+  cubo (time, y, x) é escrito direto num buffer pré-alocado, fatia a fatia,
+  para não duplicar o ano inteiro em RAM (evita OOM).
 """
 from __future__ import annotations
 
@@ -130,20 +135,117 @@ def _safe_tile(granule) -> tuple[int, int] | None:
 
 
 # ---------------------------------------------------------------------------
-# Acesso direto: S3 (in-region) ou HTTPS, via earthaccess.open
+# Acesso direto: S3 (in-region) ou HTTPS
 # ---------------------------------------------------------------------------
-def open_granule(granule):
-    """
-    Abre o granule via ``earthaccess.open`` (S3 direto se o ambiente estiver
-    in-region na AWS region da LP DAAC; HTTPS caso contrário), com retries.
-    """
+# Em vez de deixar o ``earthaccess.open`` decidir por auto-detecção de região
+# (que consulta o IMDS da EC2 e falha em pods Kubernetes -> cai para HTTPS
+# mesmo in-region), abrimos os granules explicitamente pelo S3 direto usando um
+# ``s3fs`` construído com credenciais temporárias do Earthdata. Só caímos para
+# HTTPS quando o S3 realmente não está disponível (fora da região) e o modo
+# permite (``auto``).
+_S3FS = None
+_S3FS_TS = 0.0
+_S3FS_TTL = 45 * 60.0  # renova as credenciais bem antes de expirarem (~1h)
+
+
+def _reset_s3_filesystem() -> None:
+    global _S3FS, _S3FS_TS
+    _S3FS = None
+    _S3FS_TS = 0.0
+
+
+def _new_s3_filesystem(results=None):
+    """Cria um ``s3fs.S3FileSystem`` com credenciais S3 temporárias da LP DAAC."""
     authenticate()
+    prov = config.VIIRS_S3_PROVIDER
+    attempts = [{"provider": prov}, {"daac": prov}]
+    if results:
+        attempts.append({"results": results})
+    last = None
+    for kwargs in attempts:
+        try:
+            return earthaccess.get_s3_filesystem(**kwargs)
+        except Exception as exc:  # assinatura varia entre versões do earthaccess
+            last = exc
+    raise last or RuntimeError("earthaccess.get_s3_filesystem indisponível")
+
+
+def _s3_filesystem(results=None):
+    """Devolve um ``s3fs`` cacheado, renovando as credenciais periodicamente."""
+    global _S3FS, _S3FS_TS
+    now = time.time()
+    if _S3FS is None or (now - _S3FS_TS) > _S3FS_TTL:
+        _S3FS = _new_s3_filesystem(results=results)
+        _S3FS_TS = now
+    return _S3FS
+
+
+def _direct_s3_url(granule) -> str | None:
+    """Extrai o link S3 direto (``s3://.../*.h5``) do granule, se houver."""
+    try:
+        links = granule.data_links(access="direct")
+    except Exception:
+        links = None
+    if not links:
+        return None
+    for link in links:
+        if link.startswith("s3://") and link.lower().endswith(".h5"):
+            return link
+    for link in links:
+        if link.startswith("s3://"):
+            return link
+    return None
+
+
+def _open_s3(granule):
+    """Tenta abrir o granule direto do S3; devolve ``None`` se indisponível."""
+    url = _direct_s3_url(granule)
+    if not url:
+        return None
+    try:
+        fs = _s3_filesystem(results=[granule])
+        return _with_retries(
+            fs.open, url, mode="rb",
+            what=f"s3 open {granule_ur(granule)}", attempts=3,
+        )
+    except Exception as exc:
+        tqdm.write(
+            f"    [s3 indisponível -> https] {granule_ur(granule)}: {exc!r}"
+        )
+        _reset_s3_filesystem()  # força renovar credenciais na próxima tentativa
+        return None
+
+
+def _open_https(granule):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", FutureWarning)
         files = _with_retries(
             earthaccess.open, [granule], what=f"open {granule_ur(granule)}"
         )
     return files[0]
+
+
+def open_granule(granule):
+    """
+    Abre o granule priorizando o **S3 direto** (in-region us-west-2) conforme
+    ``config.VIIRS_ACCESS_MODE``:
+
+    - ``"s3"``   -> só S3 (erro se indisponível);
+    - ``"https"``-> só HTTPS;
+    - ``"auto"`` -> S3 direto e, se falhar, HTTPS (padrão).
+    """
+    authenticate()
+    mode = config.VIIRS_ACCESS_MODE
+    if mode in ("auto", "s3"):
+        fobj = _open_s3(granule)
+        if fobj is not None:
+            return fobj
+        if mode == "s3":
+            raise RuntimeError(
+                f"acesso S3 exigido (FENOLOGIA_ACCESS=s3) mas indisponível para "
+                f"{granule_ur(granule)}"
+            )
+    return _open_https(granule)
 
 
 def _access_kind(fobj) -> tuple[str, type]:
@@ -300,10 +402,14 @@ def build_tile_cube(
     Monta o cubo de EVI (time, y, x) no grid ``template`` (EPSG:4326, cobrindo
     o balde de tiles ``tiles_hv``) para o ano ``year``.
 
-    Busca os granules VNP13A1 no CMR, abre cada um (S3/HTTPS, logado), lê o
-    EVI senoidal, reprojeta direto para ``template`` e apaga o ``.h5``
+    Busca os granules VNP13A1 no CMR, abre cada um (S3 direto/HTTPS, logado),
+    lê o EVI senoidal, reprojeta direto para ``template`` e apaga o ``.h5``
     temporário. Tiles diferentes do mesmo dia são mosaicados
-    (``combine_first``). Nada é persistido em disco além do ``.h5`` de cada
+    (``combine_first``) e escritos numa fatia de um buffer float32
+    pré-alocado (sem ``xr.concat`` de uma lista, para não duplicar o cubo em
+    RAM). Os downloads usam uma janela de prefetch limitada
+    (``VIIRS_PREFETCH_DATES``), então não seguramos o ano inteiro de granules
+    em disco de uma vez. Nada é persistido em disco além do ``.h5`` de cada
     granule, apagado imediatamente após a leitura.
 
     Retorna ``None`` se não houver granules/dados.
@@ -321,53 +427,97 @@ def build_tile_cube(
     by_date: dict[dt.date, list] = defaultdict(list)
     for g in grans:
         by_date[granule_date(g)].append(g)
+    dates_sorted = sorted(by_date)
 
-    # Pre-download all granules in parallel (IO-bound → threads safe here)
-    all_grans = [g for gs in by_date.values() for g in gs]
+    # --- Cubo pré-alocado -------------------------------------------------
+    # Escrevemos cada data direto numa fatia de um buffer float32 já alocado no
+    # tamanho do grid do balde, em vez de acumular uma lista de DataArrays e
+    # fazer ``xr.concat`` no fim (que duplicava o cubo inteiro em RAM no pico).
+    # Assim o teto de memória é ~1x o cubo + a área de trabalho de UMA data.
+    ny = template.sizes["y"]
+    nx = template.sizes["x"]
+    data = np.full((len(dates_sorted), ny, nx), np.nan, dtype="float32")
+    kept_dates: list[pd.Timestamp] = []
+    kept = 0
 
-    def _dl(g):
+    # --- Download com janela de prefetch limitada -------------------------
+    # Baixar os granules é IO-bound (threads são seguras). Mantemos só algumas
+    # datas "em voo" (``VIIRS_PREFETCH_DATES``) para sobrepor rede e CPU sem
+    # segurar em disco/memória o ano inteiro de granules de uma vez.
+    def _dl_one(g):
         try:
-            path = _fetch_granule_to_temp(g, tmp_dir, f"{label}")
-            return granule_ur(g), path
+            return _fetch_granule_to_temp(g, tmp_dir, f"{label}")
         except Exception as exc:
             tqdm.write(f"    [erro download] {granule_ur(g)}: {exc!r}")
-            return granule_ur(g), None
+            return None
 
-    n_workers = min(8, max(1, len(all_grans)))
-    prefetched: dict[str, Path | None] = {}
-    with ThreadPoolExecutor(max_workers=n_workers) as exe:
-        for ur, path in exe.map(_dl, all_grans):
-            prefetched[ur] = path
+    with ThreadPoolExecutor(max_workers=config.VIIRS_DL_WORKERS) as exe:
+        futures_by_date: dict[dt.date, dict[str, "object"]] = {}
 
-    arrays = []
-    dates = []
-    for date in sorted(by_date):
-        tile_arrays = []
-        for g in by_date[date]:
-            h5_path = prefetched.get(granule_ur(g))
-            if h5_path is None:
-                continue
-            try:
-                da = read_evi_tile(h5_path)
-                da_ll = da.rio.reproject_match(template, resampling=Resampling.nearest)
-                tile_arrays.append(da_ll)
-            except Exception as exc:
-                tqdm.write(f"    [aviso] {label} {date} {granule_ur(g)}: {exc!r}")
-            finally:
-                if h5_path is not None:
+        def _submit(date):
+            futures_by_date[date] = {
+                granule_ur(g): exe.submit(_dl_one, g) for g in by_date[date]
+            }
+
+        next_i = 0
+        for _ in range(min(config.VIIRS_PREFETCH_DATES, len(dates_sorted))):
+            _submit(dates_sorted[next_i])
+            next_i += 1
+
+        for date in dates_sorted:
+            futs = futures_by_date.pop(date)
+            # mantém a janela de prefetch cheia
+            if next_i < len(dates_sorted):
+                _submit(dates_sorted[next_i])
+                next_i += 1
+
+            mosaic = None
+            for g in by_date[date]:
+                h5_path = futs[granule_ur(g)].result()
+                if h5_path is None:
+                    continue
+                try:
+                    da = read_evi_tile(h5_path)
+                    da_ll = da.rio.reproject_match(
+                        template, resampling=Resampling.nearest
+                    )
+                    del da
+                    mosaic = da_ll if mosaic is None else mosaic.combine_first(da_ll)
+                    del da_ll
+                except Exception as exc:
+                    tqdm.write(f"    [aviso] {label} {date} {granule_ur(g)}: {exc!r}")
+                finally:
                     h5_path.unlink(missing_ok=True)
-        if not tile_arrays:
-            continue
-        mosaic = tile_arrays[0]
-        for extra in tile_arrays[1:]:
-            mosaic = mosaic.combine_first(extra)
-        arrays.append(mosaic)
-        dates.append(pd.Timestamp(date))
 
-    if not arrays:
+            if mosaic is None:
+                continue
+            arr = np.asarray(mosaic.transpose("y", "x").values, dtype="float32")
+            del mosaic
+            if arr.shape != (ny, nx):
+                tqdm.write(
+                    f"    [aviso] {label} {date}: shape inesperado {arr.shape}, "
+                    "pulando"
+                )
+                continue
+            data[kept] = arr
+            kept_dates.append(pd.Timestamp(date))
+            kept += 1
+            del arr
+
+    if kept == 0:
         return None
 
-    cube = xr.concat(arrays, dim=pd.Index(dates, name="time"))
+    cube = xr.DataArray(
+        data[:kept],
+        coords={
+            "time": pd.Index(kept_dates, name="time"),
+            "y": template["y"],
+            "x": template["x"],
+        },
+        dims=("time", "y", "x"),
+        name="evi",
+    )
+    cube = cube.rio.write_crs(template.rio.crs)
+    cube = cube.rio.set_nodata(np.nan)
     cube = cube.sortby("time")
-    cube.name = "evi"
     return cube
