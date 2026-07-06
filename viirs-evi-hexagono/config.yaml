@@ -1,0 +1,31 @@
+# file: config.yaml
+# Submissão via kbatch:  kbatch job submit -f config.yaml
+#
+# Segredos NÃO ficam aqui. Passe no submit (ou via k8s secret):
+#   AZURE_STORAGE_CONNECTION_STRING, EARTHDATA_USERNAME, EARTHDATA_PASSWORD
+# Ex.:
+#   kbatch job submit -f config.yaml \
+#     -e AZURE_STORAGE_CONNECTION_STRING="$AZURE_STORAGE_CONNECTION_STRING" \
+#     -e EARTHDATA_USERNAME="$EARTHDATA_USERNAME" \
+#     -e EARTHDATA_PASSWORD="$EARTHDATA_PASSWORD"
+name: "viirs-evi-hexagono"
+command:
+  - "python"
+  - "run.py"
+code: files
+image: "bbmprd.azurecr.io/bocombbm/planetarycomputer/bbmpcpy:20251029.4"
+env:
+  # Acesso VIIRS: "s3" força S3 direto (recomendado in-region us-west-2).
+  FENOLOGIA_ACCESS: "s3"
+  FENOLOGIA_S3_PROVIDER: "LPCLOUD"
+  # Concorrência de download / pico de memória (reduza se houver OOM).
+  FENOLOGIA_DL_WORKERS: "4"
+  FENOLOGIA_PREFETCH_DATES: "2"
+  # Janela temporal (início do VNP13A1). Ajuste p/ reduzir o custo do 1º run.
+  VIIRS_START_DATE: "2012-01-17"
+  # Universo de hexágonos: boundary do Brasil no container de input.
+  VIIRS_BOUNDARY_BLOB: "brazil.geojson"
+  # Containers de input/output no Blob Storage.
+  VIIRS_BLOB_INPUT_CONTAINER: "planetary-routines-input"
+  VIIRS_BLOB_OUTPUT_CONTAINER: "planetary-routines-output"
+  VIIRS_BLOB_OUTPUT_PREFIX: "VIIRS_EVI_HEXAGONO"

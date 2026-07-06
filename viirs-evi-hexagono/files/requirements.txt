@@ -1,0 +1,12 @@
+# Dependências não garantidas na imagem base do Planetary Computer.
+# (rasterio, xarray, geopandas, shapely, pyproj, pandas, numpy já vêm na imagem.)
+earthaccess>=0.17
+h5py>=3.10
+s3fs>=2024.2
+rioxarray>=0.15
+# IMPORTANTE: h3 v4 (a imagem base traz h3 3.7.7 / API v3, incompatível com o
+# código deste pacote, que usa a API v4: cell_to_boundary / LatLngPoly / etc.)
+h3>=4.0
+azure-storage-blob>=12.0
+pyarrow>=14
+requests>=2.28
