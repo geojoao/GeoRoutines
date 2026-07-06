@@ -33,16 +33,29 @@ e I/O via **Azure Blob Storage**.
 
    O estado é derivado **do próprio parquet** (`state.load_last_date_by_hexagon`).
 
-4. **Máscaras MapBiomas anuais, baixadas no início**: `mapbiomas.download_masks`
-   baixa para o disco do pod **todas** as máscaras (coverage + safrinha) dos
-   anos que serão tocados no run — só os necessários (num run incremental,
-   normalmente só o ano corrente). Regra de ano: a máscara é anual e, se o VIIRS
-   estiver num ano **posterior** ao último MapBiomas lançado, mantém-se o último
-   GeoTIFF (generalizado para *clamp* ao intervalo disponível de cada fonte):
-   - **coverage**: Collection 10 pública, URL por ano (existe desde 1985 até o
-     último lançado — detectado por probing);
-   - **safrinha** (`second_crop`): disponível 2020–2024; anos fora disso usam o
-     ano disponível mais próximo.
+4. **Máscaras MapBiomas anuais**: `mapbiomas.prefetch` prepara as máscaras
+   (coverage + safrinha) dos anos tocados no run — só os necessários (num run
+   incremental, normalmente só o ano corrente). Regra de ano: a máscara é anual
+   e, se o VIIRS estiver num ano **posterior** ao último MapBiomas lançado,
+   mantém-se o último GeoTIFF (generalizado para *clamp* ao intervalo
+   disponível). Fontes das URLs (todos os anos, incl. 2012–2019):
+   - **coverage**: URL pública estável da Collection 10 por ano (1985..último;
+     último detectado por *listing* do GCS numa única chamada);
+   - **safrinha** (`second_crop`): **registro de UUIDs** 2012–2024 embutido
+     (colhido da API de export do MapBiomas — UUIDs estáveis), com a API só como
+     *fallback* para coleções futuras.
+
+   **Download (padrão) vs. leitura remota**: os GeoTIFFs são COGs, mas a máscara
+   é lida **uma vez por balde** e há **poucos arquivos distintos** (um por ano)
+   — como `nº de leituras >> nº de arquivos`, **baixar cada COG uma vez e ler do
+   disco local é muito mais rápido** que reler remotamente por balde (uma
+   leitura remota de um tile inteiro leva ~dezenas de segundos; × ~60 baldes × N
+   anos inviabiliza o run completo). Por isso o padrão é **download** (~0,8 GB
+   por coverage). Para tocar poucos baldes/anos sem gastar disco,
+   `VIIRS_MAPBIOMAS_REMOTE=1` força a leitura remota via `/vsicurl` (aproveita
+   os overviews dos COGs), sem download.
+   Disco: run completo (2012–2024) ≈ 26 arquivos (~12–13 GB efêmeros); run
+   incremental ≈ 1–2 arquivos (~1,6 GB).
 
 5. **Memória**: o cubo do balde é construído **ano a ano** (um ano por vez),
    com buffer float32 pré-alocado (sem `xr.concat` de lista) — teto de RAM ~1
@@ -96,8 +109,9 @@ Saída no blob de **saída** (`planetary-routines-output`), prefixo
 | `AZURE_STORAGE_CONNECTION_STRING` | — | **obrigatória** (I/O no blob) |
 | `EARTHDATA_USERNAME` / `EARTHDATA_PASSWORD` | — | login NASA (ou `~/.netrc`) |
 | `FENOLOGIA_ACCESS` | `auto` | `s3` (força S3, recomendado in-region), `https`, `auto` |
-| `FENOLOGIA_DL_WORKERS` | `4` | concorrência de download (↓ reduz RAM) |
-| `FENOLOGIA_PREFETCH_DATES` | `2` | janela de prefetch (↓ reduz RAM/disco) |
+| `FENOLOGIA_DL_WORKERS` | `4` | concorrência de download VIIRS (↓ reduz RAM) |
+| `FENOLOGIA_PREFETCH_DATES` | `2` | janela de prefetch VIIRS (↓ reduz RAM/disco) |
+| `VIIRS_MAPBIOMAS_REMOTE` | — | `1` = lê MapBiomas remoto (/vsicurl), sem baixar (mais lento; economiza disco) |
 | `VIIRS_START_DATE` | `2012-01-17` | início da série |
 | `VIIRS_END_DATE` | hoje | fim da série (fixe p/ reprocessos determinísticos) |
 | `VIIRS_BOUNDARY_BLOB` | `brazil.geojson` | contorno no container de input |

@@ -23,6 +23,9 @@ env:
   FENOLOGIA_PREFETCH_DATES: "2"
   # Janela temporal (início do VNP13A1). Ajuste p/ reduzir o custo do 1º run.
   VIIRS_START_DATE: "2012-01-17"
+  # Máscara MapBiomas: padrão baixa os COGs (leitura local rápida). Descomente
+  # para ler remoto via /vsicurl (economiza disco, porém mais lento):
+  # VIIRS_MAPBIOMAS_REMOTE: "1"
   # Universo de hexágonos: boundary do Brasil no container de input.
   VIIRS_BOUNDARY_BLOB: "brazil.geojson"
   # Containers de input/output no Blob Storage.

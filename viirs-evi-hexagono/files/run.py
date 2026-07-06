@@ -7,7 +7,8 @@ Fluxo:
      incremental) e as partes de um run interrompido (resume);
   3. monta o universo de hexágonos (grid H3 do Brasil a partir de um boundary
      no blob de entrada, ou de uma lista de hexágonos, ou de um bbox);
-  4. pré-baixa TODAS as máscaras MapBiomas que serão usadas neste run;
+  4. prepara as máscaras MapBiomas do run (baixa os COGs por padrão; leitura
+     remota /vsicurl opcional via VIIRS_MAPBIOMAS_REMOTE=1);
   5. processa balde a balde, **incrementalmente** (só datas/hexágonos que
      faltam), enviando cada parte ao blob assim que fica pronta (durável);
   6. faz o merge canônico + partes -> novo ``evi_brazil.parquet`` e envia ao
@@ -120,10 +121,10 @@ def main():
     last_date_by_hex = state.load_last_date_by_hexagon(canonical_local)
     _log(f"Hexágonos já presentes no parquet: {len(last_date_by_hex)}")
 
-    # --- 3) pré-download das máscaras MapBiomas usadas neste run ---
+    # --- 3) máscaras MapBiomas usadas neste run (leitura remota; resolve URLs) ---
     years = pipeline.processing_years(last_date_by_hex, hex_ids, start_d, end_d)
     _log(f"Anos a tocar neste run: {years[0] if years else '-'}..{years[-1] if years else '-'}")
-    mapbiomas.download_masks(years)
+    mapbiomas.prefetch(years)
 
     # --- 4) processa balde a balde (incremental) ---
     buckets = pipeline.buckets_for_hexagons(hex_ids)
