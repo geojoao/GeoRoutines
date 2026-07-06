@@ -110,25 +110,62 @@ machine urs.earthdata.nasa.gov login seu_usuario password sua_senha
 
 ## Acesso ao VIIRS: HTTPS x S3 direto
 
-Os granules VIIRS podem ser obtidos por **HTTPS** (padrão fora da AWS) ou
-**direto do S3 da LP DAAC** (`us-west-2`). O `earthaccess.open()`
-(`fenologia/viirs.py`, `open_granule`) escolhe automaticamente: S3 direto
-quando o ambiente está *in-region* em `us-west-2` (baixa latência, sem custo
-de egress), HTTPS caso contrário — não há nenhuma variável de ambiente para
-configurar.
+Os granules VIIRS podem ser obtidos por **HTTPS** (fora da AWS) ou **direto do
+S3 da LP DAAC** (`us-west-2`). Estando *in-region* (mesma região), o S3 direto
+é bem mais rápido e sem custo de egress.
+
+**A rotina prioriza o S3 direto.** Em vez de depender da auto-detecção de
+região do `earthaccess.open()` — que consulta o IMDS da EC2
+(`169.254.169.254`) e **falha em pods Kubernetes** (o hop-limit padrão de 1
+bloqueia o acesso a nível de pod), fazendo o earthaccess cair para HTTPS mesmo
+in-region — o `open_granule` (`fenologia/viirs.py`) abre o granule
+explicitamente pelo **link `s3://` do granule**, usando um `s3fs` construído
+com as credenciais S3 temporárias do Earthdata (`earthaccess.get_s3_filesystem`).
+
+O modo é controlado por `FENOLOGIA_ACCESS`:
+
+| `FENOLOGIA_ACCESS` | Comportamento |
+|---|---|
+| `auto` (padrão) | tenta **S3 direto** e só cai para **HTTPS** se o S3 falhar (fora da região / sem credencial) |
+| `s3` | **força S3 direto** — erro se indisponível (use in-region para garantir que nada saia por HTTPS) |
+| `https` | força HTTPS (comportamento antigo) |
+
+Outras variáveis:
+
+- `FENOLOGIA_S3_PROVIDER` (padrão `LPCLOUD`) — provider/DAAC cloud usado para
+  obter as credenciais S3 temporárias.
+- `FENOLOGIA_DL_WORKERS` (padrão `4`) e `FENOLOGIA_PREFETCH_DATES` (padrão `2`)
+  — concorrência de download e janela de prefetch; **valores menores reduzem o
+  pico de memória/disco**.
 
 Para cada granule baixado, `build_tile_cube` loga o tipo de acesso usado
-(`_access_kind`, que inspeciona a classe real por trás do `EarthAccessFile`):
+(`_access_kind`, que inspeciona a classe real do file-like):
 
 ```
-[h12v10 2024-01-01] VNP13A1.A2024001.h12v10.002.xxxx: acesso via S3 (s3fs.core.S3File)
+[h12v10 2024] VNP13A1.A2024001.h12v10.002.xxxx: acesso via S3 (s3fs.core.S3File)
 ```
 
-ou `acesso via HTTPS (...)` fora de `us-west-2`. Confira essas linhas para
-validar que o tráfego está saindo pelo S3. O granule é copiado para um `.h5`
-**temporário**, lido com h5py e apagado imediatamente — a autenticação
+ou `acesso via HTTPS (...)` (fora de `us-west-2` ou no fallback). Confira essas
+linhas para validar que o tráfego está saindo pelo S3. O granule é copiado para
+um `.h5` **temporário**, lido com h5py e apagado imediatamente — a autenticação
 Earthdata é a mesma em ambos os casos (as credenciais temporárias do S3 são
 obtidas pelo earthaccess a partir do seu login).
+
+## Consumo de memória / OOM
+
+Para cada balde/ano, o `build_tile_cube` monta o cubo de EVI (time, y, x)
+escrevendo cada data direto numa **fatia de um buffer `float32` pré-alocado**
+no tamanho do grid do balde — **sem** acumular uma lista de arrays e fazer
+`xr.concat` no fim (que duplicava o cubo inteiro em RAM no pico e era a causa
+principal de OOM). O teto de memória passa a ser ~1× o cubo do balde/ano + a
+área de trabalho de **uma** data. Os downloads usam uma janela de prefetch
+limitada (`FENOLOGIA_PREFETCH_DATES`), então o ano inteiro de `.h5` não fica em
+disco de uma vez. Ao fim de cada ano o pipeline libera o cubo e chama
+`malloc_trim` para devolver as páginas ao SO (`pipeline.py`).
+
+Se ainda faltar RAM (baldes grandes = vários tiles), reduza a concorrência
+(`FENOLOGIA_DL_WORKERS=2`, `FENOLOGIA_PREFETCH_DATES=1`) ou processe menos anos
+por vez (`years=`).
 
 ## Uso
 

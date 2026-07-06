@@ -52,6 +52,31 @@ VIIRS_EVI_SCALE = 0.0001       # físico = armazenado * scale
 VIIRS_EVI_FILL = -15000
 VIIRS_EVI_VALID = (-2000, 10000)
 
+# ---------------------------------------------------------------------------
+# Acesso aos granules: S3 direto x HTTPS
+# ---------------------------------------------------------------------------
+# Modo de acesso aos granules VIIRS:
+#   "auto"  -> tenta S3 direto primeiro e cai para HTTPS se o S3 falhar (padrão);
+#   "s3"    -> força S3 direto (erro se indisponível — útil in-region para
+#              garantir que nada saia por HTTPS);
+#   "https" -> força HTTPS (comportamento antigo / fora da AWS).
+#
+# IMPORTANTE: não dependemos mais da auto-detecção de região do earthaccess
+# (que consulta o IMDS da EC2 e falha em pods Kubernetes por causa do
+# hop-limit), então "auto"/"s3" priorizam o S3 mesmo quando o IMDS não é
+# alcançável — desde que o ambiente esteja de fato in-region (us-west-2).
+VIIRS_ACCESS_MODE = os.environ.get("FENOLOGIA_ACCESS", "auto").strip().lower()
+
+# Provider (ou DAAC) cloud da LP DAAC usado para obter as credenciais S3
+# temporárias do Earthdata. VNP13A1 v002 é servido pelo LPCLOUD.
+VIIRS_S3_PROVIDER = os.environ.get("FENOLOGIA_S3_PROVIDER", "LPCLOUD").strip()
+
+# Concorrência de download e janela de prefetch (nº de datas adiantadas mantidas
+# em voo). Controlam o throughput de rede e, principalmente, o pico de
+# memória/disco — valores menores reduzem o uso de RAM.
+VIIRS_DL_WORKERS = max(1, int(os.environ.get("FENOLOGIA_DL_WORKERS", "4")))
+VIIRS_PREFETCH_DATES = max(1, int(os.environ.get("FENOLOGIA_PREFETCH_DATES", "2")))
+
 # CRS senoidal do grid VIIRS/MODIS (esfera de raio 6371007.181 m).
 VIIRS_SINU_PROJ4 = (
     "+proj=sinu +lon_0=0 +x_0=0 +y_0=0 "
