@@ -1,0 +1,172 @@
+{
+  "periodo": [
+    1961,
+    2023
+  ],
+  "n_obs": 63,
+  "share_brasil_inicio": 0.0680380508483799,
+  "share_brasil_fim": 0.2237607465865985,
+  "share_brasil_media_ult10": 0.200837243061008,
+  "corr_lp_lq": -0.4334601825976032,
+  "raiz_unitaria": {
+    "adf": [
+      {
+        "var": "lp_real (nivel)",
+        "adf_stat": -3.712315742561736,
+        "pvalue": 0.021558927689658232,
+        "lags": 1,
+        "reg": "ct"
+      },
+      {
+        "var": "lq_acucar (nivel)",
+        "adf_stat": -2.6159491285864545,
+        "pvalue": 0.27260600578253413,
+        "lags": 6,
+        "reg": "ct"
+      },
+      {
+        "var": "d.lp_real",
+        "adf_stat": -5.763356461176436,
+        "pvalue": 5.605508168727312e-07,
+        "lags": 3,
+        "reg": "c"
+      },
+      {
+        "var": "d.lq_acucar",
+        "adf_stat": -3.2302049436054774,
+        "pvalue": 0.018301532966551924,
+        "lags": 3,
+        "reg": "c"
+      }
+    ],
+    "kpss": [
+      {
+        "var": "lp_real (nivel)",
+        "kpss_stat": 0.08537052917461999,
+        "pvalue": 0.1,
+        "reg": "ct"
+      },
+      {
+        "var": "lq_acucar (nivel)",
+        "kpss_stat": 0.10179213617416884,
+        "pvalue": 0.1,
+        "reg": "ct"
+      },
+      {
+        "var": "d.lp_real",
+        "kpss_stat": 0.04827139578956295,
+        "pvalue": 0.1,
+        "reg": "c"
+      },
+      {
+        "var": "d.lq_acucar",
+        "kpss_stat": 0.0926530738132061,
+        "pvalue": 0.1,
+        "reg": "c"
+      }
+    ]
+  },
+  "cointegracao": {
+    "engle_granger_lp_lq": {
+      "stat": -3.870041507579566,
+      "pvalue": 0.03948215611025536
+    },
+    "engle_granger_lq_lp": {
+      "stat": -2.6123124894787546,
+      "pvalue": 0.45826708325356824
+    },
+    "johansen_trace_stats": [
+      19.025897093444243,
+      4.954957334797336
+    ],
+    "johansen_trace_cv95": [
+      18.3985,
+      3.8415
+    ],
+    "johansen_r0_rejeita_95": true,
+    "johansen_r1_rejeita_95": true
+  },
+  "fevd_preco_expl_por_producao_h10": 0.02009024320088,
+  "var_granger_base": {
+    "tag": "base",
+    "lags_VAR": 1,
+    "granger_q_to_p": {
+      "stat": 1.0547772813220562,
+      "pvalue": 0.3065462303012367
+    },
+    "granger_p_to_q": {
+      "stat": 0.10472636480470332,
+      "pvalue": 0.7468125931344521
+    }
+  },
+  "toda_yamamoto": {
+    "p_lags": 1,
+    "dmax": 1,
+    "granger_q_to_p": {
+      "stat": 0.5860505816675664,
+      "pvalue": 0.4472232433165015
+    },
+    "granger_p_to_q": {
+      "stat": 0.14870951315816716,
+      "pvalue": 0.7012592016498949
+    }
+  },
+  "pais_grande": {
+    "contemporaneo": {
+      "beta_dq": -0.10640834556526232,
+      "se": 0.4587585223712863,
+      "t": -0.2319484878782111,
+      "pvalue": 0.8165780234160038,
+      "r2": 0.0009991724217445208
+    },
+    "com_defasagem_soma": {
+      "beta_dq_contemp": -0.12562815014232506,
+      "p_dq_contemp": 0.7938342010752886,
+      "beta_dq_l1": -0.466481694012936,
+      "p_dq_l1": 0.3150624137890695,
+      "soma_beta": -0.592109844155261
+    },
+    "so_defasada": {
+      "beta_dq_l1": -0.4606862968462518,
+      "p_dq_l1": 0.31915583577491025
+    }
+  },
+  "robustez": {
+    "cana": {
+      "tag": "cana",
+      "lags_VAR": 1,
+      "granger_q_to_p": {
+        "stat": 0.12242495757413023,
+        "pvalue": 0.7270536331870303
+      },
+      "granger_p_to_q": {
+        "stat": 1.8366356893682196,
+        "pvalue": 0.1779788767415695
+      }
+    },
+    "preco_nominal": {
+      "tag": "nominal",
+      "lags_VAR": 5,
+      "granger_q_to_p": {
+        "stat": 2.326328177520801,
+        "pvalue": 0.04888759412522519
+      },
+      "granger_p_to_q": {
+        "stat": 1.4526230365800101,
+        "pvalue": 0.21307697630517697
+      }
+    },
+    "pos_1990": {
+      "tag": "pos1990",
+      "lags_VAR": 1,
+      "granger_q_to_p": {
+        "stat": 0.014213254561071791,
+        "pvalue": 0.9055135526579969
+      },
+      "granger_p_to_q": {
+        "stat": 1.1827969127423326,
+        "pvalue": 0.2812862395318754
+      }
+    }
+  }
+}
