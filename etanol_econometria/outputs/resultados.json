@@ -1,0 +1,153 @@
+{
+  "periodo": [
+    1990,
+    2022
+  ],
+  "n_obs": 33,
+  "share_brasil_inicio": 0.7957663661309291,
+  "share_brasil_fim": 0.2860915679076516,
+  "corr_preco_ref_mundo_vs_eua": 0.9978577424632699,
+  "corr_lp_lq": 0.0027482158196152026,
+  "raiz_unitaria": {
+    "adf": [
+      {
+        "var": "lp_real (nivel)",
+        "adf_stat": -2.5524177712807328,
+        "pvalue": 0.3022693323404281,
+        "lags": 0
+      },
+      {
+        "var": "lq (nivel)",
+        "adf_stat": -2.66990231400949,
+        "pvalue": 0.24879065722536503,
+        "lags": 6
+      },
+      {
+        "var": "d.lp_real",
+        "adf_stat": -5.929727019344621,
+        "pvalue": 2.396477449769183e-07,
+        "lags": 0
+      },
+      {
+        "var": "d.lq",
+        "adf_stat": -2.1836713726942163,
+        "pvalue": 0.21222509098005038,
+        "lags": 7
+      }
+    ],
+    "kpss": [
+      {
+        "var": "lp_real (nivel)",
+        "kpss_stat": 0.11851433080014125,
+        "pvalue": 0.1
+      },
+      {
+        "var": "lq (nivel)",
+        "kpss_stat": 0.12966949092784147,
+        "pvalue": 0.08024168346696023
+      },
+      {
+        "var": "d.lp_real",
+        "kpss_stat": 0.10781116977066604,
+        "pvalue": 0.1
+      },
+      {
+        "var": "d.lq",
+        "kpss_stat": 0.07271003978494446,
+        "pvalue": 0.1
+      }
+    ]
+  },
+  "cointegracao": {
+    "engle_granger_lp_lq_pvalue": 0.44701397822714134,
+    "engle_granger_lq_lp_pvalue": 0.5146133190734548,
+    "johansen_trace": [
+      16.400552331652943,
+      5.779902581932916
+    ],
+    "johansen_cv95": [
+      18.3985,
+      3.8415
+    ],
+    "johansen_r0_rejeita_95": false,
+    "johansen_r1_rejeita_95": true
+  },
+  "fevd_preco_expl_por_producao_h10": 0.05423208435493762,
+  "var_granger_base": {
+    "tag": "base",
+    "lags_VAR": 1,
+    "granger_q_to_p": {
+      "stat": 0.2533675235009676,
+      "pvalue": 0.6166880839496973
+    },
+    "granger_p_to_q": {
+      "stat": 0.16209911771451369,
+      "pvalue": 0.6887640643508863
+    }
+  },
+  "toda_yamamoto": {
+    "p_lags": 1,
+    "granger_q_to_p": {
+      "stat": 0.3641826530913103,
+      "pvalue": 0.5516290461564883
+    },
+    "granger_p_to_q": {
+      "stat": 0.00598080857973574,
+      "pvalue": 0.9389721287574179
+    }
+  },
+  "pais_grande": {
+    "contemporaneo": {
+      "beta_dq": -0.43872189831086217,
+      "pvalue": 0.04420050829709266,
+      "r2": 0.05858915257971564
+    },
+    "com_defasagem": {
+      "beta_dq": -0.4053969369282377,
+      "p_dq": 0.07383965761295362,
+      "beta_dq_l1": -0.11242124458404057,
+      "p_dq_l1": 0.7092670158745957,
+      "soma": -0.5178181815122782
+    }
+  },
+  "nexo_producao_br": {
+    "beta_acucar_l1": 0.047923429144085296,
+    "p_acucar_l1": 0.5981871167603643,
+    "beta_oil_l1": 0.01125392587578521,
+    "p_oil_l1": 0.8988979928520994,
+    "beta_preco_etanol_l1": -0.008525837572698296,
+    "p_preco_etanol_l1": 0.9446623150249083,
+    "r2": 0.010959266929361333
+  },
+  "fevd_preco_etanol_h10": {
+    "por_producao_br": 0.05557021269118482,
+    "por_petroleo": 0.46049505278658387,
+    "por_proprio": 0.4839347345222314
+  },
+  "robustez": {
+    "preco_nominal": {
+      "tag": "nominal",
+      "lags_VAR": 1,
+      "granger_q_to_p": {
+        "stat": 0.2739050509240877,
+        "pvalue": 0.6027891151767701
+      },
+      "granger_p_to_q": {
+        "stat": 0.1531639610283406,
+        "pvalue": 0.6970151116851966
+      }
+    },
+    "pos_2005": {
+      "tag": "pos2005",
+      "lags_VAR": 3,
+      "granger_q_to_p": {
+        "stat": 2.220031176368698,
+        "pvalue": 0.131023595799482
+      },
+      "granger_p_to_q": {
+        "stat": 3.4540789666639675,
+        "pvalue": 0.045764088037844916
+      }
+    }
+  }
+}
